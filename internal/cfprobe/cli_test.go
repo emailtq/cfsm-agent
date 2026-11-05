@@ -1,6 +1,62 @@
 package cfprobe
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestTerminalInstallFlags(t *testing.T) {
+	for _, args := range [][]string{nil, {"-terminal=0"}} {
+		got, err := parseInstallOptions(args)
+		if err != nil || got.TerminalEnabled || got.TerminalToken != "" {
+			t.Fatal("disabled install requires no token")
+		}
+	}
+	for _, value := range []string{"", "2", "true", " 1"} {
+		if _, err := parseInstallOptions([]string{"-terminal=" + value}); err == nil {
+			t.Fatal("invalid terminal flag accepted")
+		}
+	}
+	token := strings.Repeat("a", 64)
+	if _, err := parseInstallOptions([]string{"-terminal-token=" + token}); err == nil || strings.Contains(err.Error(), token) {
+		t.Fatal("plaintext token flag accepted or leaked")
+	}
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseInstallOptions([]string{"-terminal=1", "-terminal-token-file=" + path})
+	if runtime.GOOS == "linux" {
+		if err != nil || !got.TerminalEnabled || got.TerminalToken != token || !got.Explicit["terminal_token_file"] {
+			t.Fatal("owner-only token not read")
+		}
+	} else if err == nil {
+		t.Fatal("unsupported platform accepted token file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("source token deleted")
+	}
+}
+
+func TestTerminalInvalidOptionsDoNotReplaceConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.conf")
+	original := []byte("SERVER_ID=preserved\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-terminal=invalid"}, {"-terminal-token-file=relative"}, {"-terminal-token-file="}} {
+		if _, err := parseInstallOptions(args); err == nil {
+			t.Fatal("invalid options accepted")
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != string(original) {
+			t.Fatal("original config changed")
+		}
+	}
+}
 
 func TestParseUninstallArgsAllowsNoArgs(t *testing.T) {
 	if err := parseUninstallArgs(nil); err != nil {

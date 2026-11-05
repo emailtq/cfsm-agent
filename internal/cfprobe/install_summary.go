@@ -27,6 +27,14 @@ type managementCommand struct {
 	command string
 }
 
+func printTerminalConsent(enabled bool) {
+	state := "disabled"
+	if enabled {
+		state = "enabled (local Linux consent)"
+	}
+	fmt.Printf("  Terminal    : %s\n", state)
+}
+
 func printProbeNodes(opts InstallOptions) {
 	printProbeNode(labelCTNode, opts.CTNode)
 	printProbeNode(labelCUNode, opts.CUNode)

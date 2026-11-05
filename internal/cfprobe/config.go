@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -170,6 +172,8 @@ func readConfig(path string) (Config, error) {
 	cfg.UA = normalizeUserAgentValue(values["UA"])
 	cfg.AutoUpdate = values["AUTO_UPDATE"] == "1"
 	cfg.UpdateProxy = strings.TrimSpace(values["UPDATE_PROXY"])
+	cfg.TerminalEnabled = values["TERMINAL_ENABLED"] == "1"
+	cfg.TerminalToken = values["TERMINAL_TOKEN"]
 	cfg.ConfigMD5 = values["CONFIG_MD5"]
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
@@ -212,16 +216,74 @@ func writeConfig(path string, cfg Config) error {
 		writeKV("AUTO_UPDATE", "0")
 	}
 	writeKV("UPDATE_PROXY", cfg.UpdateProxy)
+	writeKV("TERMINAL_ENABLED", boolInt(cfg.TerminalEnabled))
+	writeKV("TERMINAL_TOKEN", cfg.TerminalToken)
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
 	}
 	writeKV("CONFIG_MD5", cfg.ConfigMD5)
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o600); err != nil {
+	// A fresh 0600 file avoids following or reusing a predictable stale temp file.
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func validTerminalToken(token string) bool {
+	return len(token) == 64 && !strings.ContainsFunc(token, func(r rune) bool {
+		return !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f')
+	})
+}
+
+func validateTerminalTokenInfo(info os.FileInfo) error {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return errors.New("terminal token file must be regular and owner-only")
+	}
+	return nil
+}
+
+func readTerminalTokenFile(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("terminal token file requires an absolute local path")
+	}
+	if runtime.GOOS != "linux" {
+		return "", errors.New("terminal token installation is supported only on Linux")
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return "", errors.New("cannot inspect terminal token file")
+	}
+	if err := validateTerminalTokenInfo(before); err != nil {
+		return "", err
+	}
+	f, err := openTerminalTokenFile(path)
+	if err != nil {
+		return "", errors.New("cannot open terminal token file")
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !os.SameFile(before, info) {
+		return "", errors.New("terminal token file changed while opening")
+	}
+	if err := validateTerminalTokenInfo(info); err != nil {
+		return "", err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil || !validTerminalToken(string(data)) {
+		return "", errors.New("terminal token must be exactly 64 lowercase hexadecimal characters")
+	}
+	return string(data), nil
 }
 
 func normalizeConfigIntervals(cfg *Config) {

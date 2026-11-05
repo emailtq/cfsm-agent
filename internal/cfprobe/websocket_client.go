@@ -101,6 +101,9 @@ func dialReportWebSocket(ctx context.Context, rawURL string, headers http.Header
 	if err != nil {
 		return nil, nil, started, time.Now(), err
 	}
+	transportConn := conn
+	stopCancellation := context.AfterFunc(handshakeCtx, func() { _ = transportConn.Close() })
+	defer stopCancellation()
 	deadline := started.Add(timeout)
 	_ = conn.SetDeadline(deadline)
 	if scheme == "wss" {
@@ -250,6 +253,55 @@ func (c *webSocketConn) WriteText(payload []byte, timeout time.Duration) error {
 	return c.writeFrame(wsOpcodeText, payload, timeout)
 }
 
+func (c *webSocketConn) WriteBinary(payload []byte, timeout time.Duration) error {
+	if len(payload) > terminalMaxDataFrameBytes {
+		return fmt.Errorf("terminal binary frame too large")
+	}
+	if timeout <= 0 || timeout > wssWriteTimeout {
+		timeout = wssWriteTimeout
+	}
+	return c.writeFrame(wsOpcodeBinary, payload, timeout)
+}
+
+// The terminal reader caps text and binary independently, including continuations.
+// Reporting keeps ReadDataMessage's existing one-MiB limit and permissive reader.
+func (c *webSocketConn) ReadDataMessageLimit(limit int) ([]byte, byte, error) {
+	if limit <= 0 || limit > webSocketMaxMessageSize {
+		return nil, 0, fmt.Errorf("invalid WSS message limit")
+	}
+	limit = min(limit, terminalMaxDataFrameBytes)
+	var message []byte
+	var opcode byte
+	for {
+		frame, err := c.readFrameLimit(limit-len(message), opcode, true)
+		if err != nil {
+			return nil, 0, err
+		}
+		switch frame.opcode {
+		case wsOpcodePing:
+			if err := c.writeFrame(wsOpcodePong, frame.payload, wssWriteTimeout); err != nil {
+				return nil, 0, err
+			}
+			continue
+		case wsOpcodePong:
+			continue
+		case wsOpcodeClose:
+			code, _ := parseWebSocketClose(frame.payload)
+			_ = c.writeFrame(wsOpcodeClose, frame.payload, wssWriteTimeout)
+			return nil, 0, &wsCloseError{Code: code}
+		case wsOpcodeText, wsOpcodeBinary:
+			opcode = frame.opcode
+			if opcode == wsOpcodeText {
+				limit = min(limit, terminalMaxControlFrameBytes)
+			}
+		}
+		message = append(message, frame.payload...)
+		if frame.fin {
+			return message, opcode, nil
+		}
+	}
+}
+
 func (c *webSocketConn) SetReadDeadline(t time.Time) error {
 	return c.conn.SetReadDeadline(t)
 }
@@ -259,6 +311,10 @@ func (c *webSocketConn) Close() error {
 }
 
 func (c *webSocketConn) readFrame() (wsFrame, error) {
+	return c.readFrameLimit(webSocketMaxMessageSize, 0, false)
+}
+
+func (c *webSocketConn) readFrameLimit(limit int, messageOpcode byte, strict bool) (wsFrame, error) {
 	var header [2]byte
 	if _, err := io.ReadFull(c.reader, header[:]); err != nil {
 		return wsFrame{}, err
@@ -267,6 +323,32 @@ func (c *webSocketConn) readFrame() (wsFrame, error) {
 	opcode := header[0] & 0x0F
 	masked := header[1]&0x80 != 0
 	length := uint64(header[1] & 0x7F)
+	lengthCode := length
+	if strict {
+		if header[0]&0x70 != 0 || masked {
+			return wsFrame{}, fmt.Errorf("invalid WSS frame flags")
+		}
+		switch opcode {
+		case wsOpcodeText, wsOpcodeBinary:
+			if messageOpcode != 0 {
+				return wsFrame{}, fmt.Errorf("WSS fragmented message overlapped")
+			}
+			if opcode == wsOpcodeText {
+				limit = min(limit, terminalMaxControlFrameBytes)
+			}
+		case wsOpcodeContinuation:
+			if messageOpcode == 0 {
+				return wsFrame{}, fmt.Errorf("WSS continuation without message")
+			}
+		case wsOpcodePing, wsOpcodePong, wsOpcodeClose:
+			if !fin || lengthCode > 125 {
+				return wsFrame{}, fmt.Errorf("invalid WSS control frame")
+			}
+			limit = 125
+		default:
+			return wsFrame{}, fmt.Errorf("unsupported WSS opcode")
+		}
+	}
 	switch length {
 	case 126:
 		var ext [2]byte
@@ -281,7 +363,10 @@ func (c *webSocketConn) readFrame() (wsFrame, error) {
 		}
 		length = binary.BigEndian.Uint64(ext[:])
 	}
-	if length > webSocketMaxMessageSize {
+	if strict && (lengthCode == 126 && length < 126 || lengthCode == 127 && (length < 65536 || length>>63 != 0) || opcode == wsOpcodeClose && length == 1) {
+		return wsFrame{}, fmt.Errorf("invalid WSS frame length")
+	}
+	if length > uint64(limit) {
 		return wsFrame{}, fmt.Errorf("WSS frame too large")
 	}
 	var maskKey [4]byte
@@ -304,11 +389,36 @@ func (c *webSocketConn) readFrame() (wsFrame, error) {
 	return wsFrame{fin: fin, opcode: opcode, payload: payload}, nil
 }
 
+func dialTerminalWebSocket(ctx context.Context, cfg Config, sessionID, ticket string, usePublicDNS bool) (*webSocketConn, error) {
+	endpoint, err := terminalWebSocketURL(cfg.WorkerURL, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sessionID != "" && ticket == "" || sessionID == "" && ticket != "" {
+		return nil, fmt.Errorf("invalid terminal session ticket binding")
+	}
+	headers, err := terminalWebSocketHeaders(cfg, ticket)
+	if err != nil {
+		return nil, err
+	}
+	conn, _, _, _, err := dialReportWebSocket(ctx, endpoint, headers, usePublicDNS, wssHandshakeTimeout)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Handshake bodies/peer errors may echo credentials; never surface them.
+		return nil, fmt.Errorf("terminal WSS connection failed")
+	}
+	return conn, nil
+}
+
 func (c *webSocketConn) writeFrame(opcode byte, payload []byte, timeout time.Duration) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if timeout > 0 {
-		_ = c.conn.SetWriteDeadline(time.Now().Add(timeout))
+		if err := c.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			return err
+		}
 		defer c.conn.SetWriteDeadline(time.Time{})
 	}
 	maskKey := [4]byte{}

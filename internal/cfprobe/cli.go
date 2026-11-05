@@ -54,7 +54,7 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	var autoUpdate, debug string
+	var autoUpdate, debug, terminal, terminalTokenFile string
 	var ignoredInstallVersion string
 	fs.StringVar(&opts.ServerID, "id", "", "")
 	fs.StringVar(&opts.Name, "name", "", "")
@@ -87,6 +87,8 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs.StringVar(&debug, "debug", "", "")
 	fs.StringVar(&opts.UpdateProxy, "install-ghproxy", "", "")
 	fs.StringVar(&ignoredInstallVersion, "install-version", "", "")
+	fs.StringVar(&terminal, "terminal", "", "")
+	fs.StringVar(&terminalTokenFile, "terminal-token-file", "", "")
 
 	if err := fs.Parse(args); err != nil {
 		printUsage(os.Stderr)
@@ -97,6 +99,18 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 		opts.Explicit[canonicalInstallFlag(f.Name)] = true
 	})
 	var err error
+	if opts.Explicit["terminal"] {
+		if terminal != "0" && terminal != "1" {
+			return opts, fmt.Errorf("terminal supports only 0 or 1")
+		}
+		opts.TerminalEnabled = terminal == "1"
+	}
+	if opts.Explicit["terminal_token_file"] {
+		opts.TerminalToken, err = readTerminalTokenFile(terminalTokenFile)
+		if err != nil {
+			return opts, err
+		}
+	}
 	opts.AutoUpdate, err = normalizeBinaryValue(autoUpdate, false)
 	if err != nil {
 		return opts, fmt.Errorf("auto_update 参数非法: %w", err)
@@ -185,6 +199,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -ua=UA               上报请求的 User-Agent，默认cfsm；服务端会按站点设置覆盖")
 	fmt.Fprintln(w, "  -auto_update=0|1     开启自动检查更新，默认0")
 	fmt.Fprintln(w, "  -install-ghproxy=URL 自动更新下载代理")
+	fmt.Fprintln(w, "  -terminal=0|1       Local Linux terminal consent (default off)")
+	fmt.Fprintln(w, "  -terminal-token-file=PATH  Absolute owner-only local token file")
 	fmt.Fprintln(w, "  -rx_correction=N     下行流量校正(GB)")
 	fmt.Fprintln(w, "  -tx_correction=N     上行流量校正(GB)")
 	fmt.Fprintln(w, "  -debug=0|1           输出调试日志，默认0")

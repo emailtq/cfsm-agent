@@ -44,9 +44,12 @@ type Config struct {
 	PingMode        string
 	// UA 是上报请求的自定义 User-Agent，由服务端通过独立通道下发（不参与 ConfigMD5 比对），
 	// 本地安装参数 -ua 只作为初值。
-	UA         string
-	AutoUpdate bool
-	UpdateProxy     string
+	UA          string
+	AutoUpdate  bool
+	UpdateProxy string
+	// Terminal consent and credential are local-only, never dynamic configuration.
+	TerminalEnabled bool
+	TerminalToken   string
 	// ConfigMD5 mirrors the worker dynamic config version; local fields like
 	// AutoUpdate and UpdateProxy are intentionally outside that comparison.
 	ConfigMD5 string

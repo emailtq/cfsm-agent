@@ -2,8 +2,165 @@ package cfprobe
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+type terminalTokenInfo struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (i terminalTokenInfo) Mode() os.FileMode { return i.mode }
+
+func TestTerminalTokenValidationAndFilesystem(t *testing.T) {
+	for _, token := range []string{strings.Repeat("a", 64), strings.Repeat("0", 64)} {
+		if !validTerminalToken(token) {
+			t.Fatal("valid token rejected")
+		}
+	}
+	for _, token := range []string{"", strings.Repeat("A", 64), strings.Repeat("a", 63), strings.Repeat("a", 65), strings.Repeat("a", 64) + "\n", strings.Repeat("g", 64)} {
+		if validTerminalToken(token) {
+			t.Fatal("invalid token accepted")
+		}
+	}
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		if err := validateTerminalTokenInfo(terminalTokenInfo{mode: mode}); err != nil {
+			t.Fatal("owner-only mode rejected")
+		}
+	}
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o606, os.ModeSymlink | 0o600, os.ModeDir | 0o600, os.ModeNamedPipe | 0o600, os.ModeSetuid | 0o600} {
+		if err := validateTerminalTokenInfo(terminalTokenInfo{mode: mode}); err == nil {
+			t.Fatal("unsafe file metadata accepted")
+		}
+	}
+	if _, err := readTerminalTokenFile("relative"); err == nil {
+		t.Fatal("relative path accepted")
+	}
+	path := filepath.Join(t.TempDir(), "token")
+	token := strings.Repeat("a", 64)
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "linux" {
+		if _, err := readTerminalTokenFile(path); err == nil {
+			t.Fatal("non-Linux permission check bypassed")
+		}
+		return
+	}
+	got, err := readTerminalTokenFile(path)
+	if err != nil || got != token {
+		t.Fatal("real Linux token read failed")
+	}
+	if err := os.Symlink(path, path+".link"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTerminalTokenFile(path + ".link"); err == nil {
+		t.Fatal("symlink accepted")
+	}
+	if _, err := readTerminalTokenFile(filepath.Dir(path)); err == nil {
+		t.Fatal("directory accepted")
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTerminalTokenFile(path); err == nil {
+		t.Fatal("world-readable file accepted")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{token + "\n", strings.Repeat("A", 64), strings.Repeat("a", 1024)} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readTerminalTokenFile(path); err == nil || strings.Contains(err.Error(), content) {
+			t.Fatal("invalid source accepted or leaked")
+		}
+	}
+}
+
+func TestTerminalTokenOpenerRejectsSymlink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "linux" {
+		if file, err := openTerminalTokenFile(path); err == nil {
+			file.Close()
+			t.Fatal("unsupported platform opened token")
+		}
+		return
+	}
+	file, err := openTerminalTokenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if err := os.Symlink(path, path+".link"); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := openTerminalTokenFile(path + ".link"); err == nil {
+		file.Close()
+		t.Fatal("kernel token opener followed symlink")
+	}
+}
+
+func TestTerminalConfigAtomicWriteIgnoresPreexistingTemp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.conf")
+	if err := os.WriteFile(path+".tmp", []byte("unrelated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.TerminalToken = strings.Repeat("a", 64)
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	temp, err := os.ReadFile(path + ".tmp")
+	if err != nil || string(temp) != "unrelated" {
+		t.Fatal("predictable temp replaced or exposed credential")
+	}
+	if runtime.GOOS == "linux" {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatal("config is not owner-only")
+		}
+	}
+}
+
+func TestTerminalConfigDefaultLegacyAndRoundTrip(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.TerminalEnabled || cfg.TerminalToken != "" {
+		t.Fatal("terminal must default off")
+	}
+	path := filepath.Join(t.TempDir(), "config.conf")
+	if err := os.WriteFile(path, []byte("SERVER_ID=legacy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := readConfig(path)
+	if err != nil || legacy.TerminalEnabled || legacy.TerminalToken != "" {
+		t.Fatal("legacy opt-in changed")
+	}
+	cfg.TerminalEnabled = true
+	cfg.TerminalToken = strings.Repeat("a", 64)
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readConfig(path)
+	if err != nil || !got.TerminalEnabled || got.TerminalToken != cfg.TerminalToken {
+		t.Fatal("terminal roundtrip failed")
+	}
+	cfg.TerminalEnabled = false
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err = readConfig(path)
+	if err != nil || got.TerminalEnabled || got.TerminalToken != cfg.TerminalToken {
+		t.Fatal("disabled credential lost")
+	}
+}
 
 func TestNormalizeInterfaceList(t *testing.T) {
 	got, err := normalizeInterfaceList(" eth0,ens3,eth0, pppoe-wan ")

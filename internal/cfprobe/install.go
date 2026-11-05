@@ -34,6 +34,9 @@ func Install(opts InstallOptions, version string) error {
 		opts.ConfigMD5 = "none"
 	}
 	normalizeConfigIntervals(&opts.Config)
+	if err := validateTerminalInstall(opts.Config, opts.Explicit); err != nil {
+		return err
+	}
 
 	// Validate and sample before stopping either the current or a legacy service.
 	correctionNet, err := prepareInstallTrafficCorrection(opts, readNetBytes)
@@ -158,8 +161,28 @@ func mergeExplicitInstallConfig(dst *Config, src Config, explicit map[string]boo
 			dst.AutoUpdate = src.AutoUpdate
 		case "install_ghproxy":
 			dst.UpdateProxy = src.UpdateProxy
+		case "terminal":
+			dst.TerminalEnabled = src.TerminalEnabled
+		case "terminal_token_file":
+			dst.TerminalToken = src.TerminalToken
 		}
 	}
+}
+
+func validateTerminalInstall(cfg Config, explicit map[string]bool) error {
+	if !cfg.TerminalEnabled || !explicit["terminal"] && !explicit["terminal_token_file"] {
+		return nil
+	}
+	if runtime.GOOS != "linux" {
+		return errors.New("terminal is supported only on Linux")
+	}
+	if !validTerminalToken(cfg.TerminalToken) {
+		return errors.New("terminal requires a valid local node token")
+	}
+	if _, err := terminalWebSocketURL(cfg.WorkerURL, ""); err != nil {
+		return err
+	}
+	return nil
 }
 
 func printWindowsAutoUpdateWarning(paths Paths, opts InstallOptions) {
@@ -312,6 +335,7 @@ func printInstallSummary(paths Paths, opts InstallOptions) {
 	fmt.Printf("  Secret      : ********\n")
 	fmt.Printf("  Worker URL  : %s\n", opts.WorkerURL)
 	fmt.Printf("  Debug       : %v\n", opts.Debug)
+	printTerminalConsent(opts.TerminalEnabled)
 	printProbeNodes(opts)
 	printManagementCommands(paths)
 	fmt.Println("===========================================")

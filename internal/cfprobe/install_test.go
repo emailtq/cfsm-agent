@@ -2,11 +2,75 @@ package cfprobe
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestTerminalSummaryDoesNotPrintCredential(t *testing.T) {
+	token := strings.Repeat("a", 64)
+	for _, enabled := range []bool{false, true} {
+		output, err := os.CreateTemp(t.TempDir(), "summary")
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stdout
+		func() {
+			defer func() { os.Stdout = old }()
+			os.Stdout = output
+			printInstallSummary(Paths{}, InstallOptions{Config: Config{ServerID: "sid", TerminalEnabled: enabled, TerminalToken: token}})
+		}()
+		if _, err := output.Seek(0, 0); err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(output)
+		output.Close()
+		if err != nil || strings.Contains(string(data), token) || strings.Contains(string(data), "TERMINAL_TOKEN") {
+			t.Fatal("credential leaked in summary")
+		}
+		want := "disabled"
+		if enabled {
+			want = "enabled (local Linux consent)"
+		}
+		if !strings.Contains(string(data), "Terminal    : "+want) {
+			t.Fatal("local consent missing from summary")
+		}
+	}
+}
+
+func TestTerminalReinstallExplicitAndAbsent(t *testing.T) {
+	existing := Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), WorkerURL: "https://worker.example/update"}
+	got := existing
+	mergeExplicitInstallConfig(&got, defaultConfig(), map[string]bool{"auto_update": true})
+	if !got.TerminalEnabled || got.TerminalToken != existing.TerminalToken {
+		t.Fatal("reinstall lost local consent")
+	}
+	mergeExplicitInstallConfig(&got, Config{}, map[string]bool{"terminal": true})
+	if got.TerminalEnabled || got.TerminalToken != existing.TerminalToken {
+		t.Fatal("disable must retain credential")
+	}
+	newToken := strings.Repeat("b", 64)
+	mergeExplicitInstallConfig(&got, Config{TerminalToken: newToken}, map[string]bool{"terminal_token_file": true})
+	if got.TerminalEnabled || got.TerminalToken != newToken {
+		t.Fatal("local rotation changed switch or failed")
+	}
+	if err := validateTerminalInstall(defaultConfig(), nil); err != nil {
+		t.Fatal("disabled install checked platform")
+	}
+	if err := validateTerminalInstall(Config{TerminalEnabled: true}, map[string]bool{"terminal": true}); err == nil {
+		t.Fatal("missing credential accepted")
+	}
+	err := validateTerminalInstall(existing, map[string]bool{"terminal": true})
+	if (err == nil) != (runtime.GOOS == "linux") {
+		t.Fatal("platform consent check incorrect")
+	}
+	if err := validateTerminalInstall(existing, nil); err != nil {
+		t.Fatal("ordinary reinstall blocked")
+	}
+}
 
 func TestPrepareInstallTrafficCorrection(t *testing.T) {
 	readErr := errors.New("network counters unavailable")

@@ -1,6 +1,8 @@
 package cfprobe
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +15,22 @@ import (
 	"testing"
 	"time"
 )
+
+func TestTerminalBoundedReaderDoesNotLowerReportingLimit(t *testing.T) {
+	for _, opcode := range []byte{wsOpcodeText, wsOpcodeBinary} {
+		data := bytes.Repeat([]byte("x"), 32768)
+		wire := terminalTestFrame(opcode, true, data)
+		report := &webSocketConn{reader: bufio.NewReader(bytes.NewReader(wire))}
+		got, kind, err := report.ReadDataMessage()
+		if err != nil || kind != opcode || !bytes.Equal(got, data) {
+			t.Fatal("reporting limit/behavior changed")
+		}
+		terminal := &webSocketConn{reader: bufio.NewReader(bytes.NewReader(wire))}
+		if _, _, err := terminal.ReadDataMessageLimit(16384); err == nil {
+			t.Fatal("terminal inherited reporting limit")
+		}
+	}
+}
 
 func TestReportWebSocketURLConvertsHTTPUpdateURL(t *testing.T) {
 	tests := map[string]string{
@@ -28,6 +46,63 @@ func TestReportWebSocketURLConvertsHTTPUpdateURL(t *testing.T) {
 		if got != want {
 			t.Fatalf("reportWebSocketURL(%q) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
+	token := strings.Repeat("a", 64)
+	root := t.TempDir()
+	cfg := defaultConfig()
+	cfg.ServerID = "sid"
+	cfg.WorkerURL = "https://worker.example/update"
+	cfg.ConnectionMode = connectionModeHTTP
+	cfg.ConfigMD5 = strings.Repeat("b", 32)
+	cfg.TerminalEnabled = true
+	cfg.TerminalToken = token
+	agent := Agent{cfg: cfg, paths: Paths{ConfigFile: root + "/config.conf", TrafficFile: root + "/traffic.dat"}, log: newLogger(false)}
+	if err := writeConfig(agent.paths.ConfigFile, cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := agent.buildReportBodyForConfig(cfg, Metrics{CPU: "1"}, time.Unix(100, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := cfg
+	other.TerminalEnabled = false
+	other.TerminalToken = strings.Repeat("c", 64)
+	comparison := Agent{}
+	after, _, err := comparison.buildReportBodyForConfig(other, Metrics{CPU: "1"}, time.Unix(100, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || strings.Contains(string(before), token) || strings.Contains(strings.ToLower(string(before)), "terminal") {
+		t.Fatal("local terminal fields changed metric/config-MD5 wire payload")
+	}
+	base := "collect_interval=0&report_interval=120&reset_day=1&schema_version=7&connection_mode=http"
+	for _, field := range []string{"terminal_enabled=1", "terminal_token=" + strings.Repeat("c", 64)} {
+		for _, wss := range []bool{false, true} {
+			var err error
+			if wss {
+				err = agent.applyWSSRemoteConfig([]byte(base+"&"+field), nil)
+			} else {
+				err = agent.applyRemoteConfig([]byte(base+"&"+field), http.Header{"X-Agent-Config-Md5": {strings.Repeat("c", 32)}})
+			}
+			if err == nil {
+				t.Fatal("remote terminal override accepted")
+			}
+		}
+	}
+	if err := agent.applyRemoteConfig([]byte(base), http.Header{"X-Agent-Config-Md5": {strings.Repeat("c", 32)}}); err != nil {
+		t.Fatal(err)
+	}
+	agent.applyRemoteUserAgent("test/1")
+	persisted, err := readConfig(agent.paths.ConfigFile)
+	if err != nil || !persisted.TerminalEnabled || persisted.TerminalToken != token || persisted.ConfigMD5 != strings.Repeat("c", 32) || persisted.UA != "test/1" {
+		t.Fatal("remote merge lost local credential")
+	}
+	wsURL, err := reportWebSocketURLWithConfig(cfg.WorkerURL, configSchemaVersion, cfg.ConfigMD5)
+	if err != nil || strings.Contains(wsURL, token) || strings.Contains(wsURL, "terminal") {
+		t.Fatal("report URL leaked terminal token")
 	}
 }
 
