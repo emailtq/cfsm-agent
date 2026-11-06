@@ -3,6 +3,7 @@ module github.com/huilang-me/cfsm-agent
 go 1.27.3
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/prometheus-community/pro-bing v0.9.1
 	github.com/shirou/gopsutil/v4 v4.26.9
 	golang.org/x/sys v0.49.0
