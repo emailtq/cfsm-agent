@@ -323,7 +323,7 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string, cf
 		return
 	}
 
-	method, err := scheduleUpdateInstall(a.paths, binPath, now)
+	method, err := scheduleUpdateInstall(a.paths, binPath, now, a.stopTerminal)
 	if err != nil {
 		_ = os.Remove(binPath)
 		a.log.info("schedule update failed: %v", err)
@@ -335,14 +335,39 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string, cf
 		candidate.TagName, candidate.AssetName, method, reason, autoUpdateDelay)
 }
 
-func scheduleUpdateInstall(paths Paths, binPath string, now int64) (string, error) {
+type updateInstallers struct {
+	windows func(Paths, string) (string, error)
+	unix    func(string, string, string, int64) (string, error)
+	user    func(Paths, string, func()) (string, error)
+}
+
+func scheduleUpdateInstall(paths Paths, binPath string, now int64, cleanup ...func()) (string, error) {
+	var beforeExit func()
+	if len(cleanup) != 0 {
+		beforeExit = cleanup[0]
+	}
+	return scheduleUpdateWithInstallers(paths, binPath, now, beforeExit, updateInstallers{
+		windows: scheduleWindowsUpdateInstall, unix: scheduleUnixUpdateInstall,
+		user: func(paths Paths, path string, beforeExit func()) (string, error) {
+			return scheduleUserModeUpdateWithExit(paths, path, beforeExit, func(delay time.Duration, fn func()) { time.AfterFunc(delay, fn) }, os.Exit)
+		},
+	})
+}
+
+func scheduleUpdateWithInstallers(paths Paths, binPath string, now int64, beforeExit func(), ops updateInstallers) (string, error) {
+	var method string
+	var err error
 	if runtime.GOOS == "windows" {
-		return scheduleWindowsUpdateInstall(paths, binPath)
+		method, err = ops.windows(paths, binPath)
+	} else if paths.UserMode {
+		return ops.user(paths, binPath, beforeExit)
+	} else {
+		method, err = ops.unix(paths.ServiceName, paths.LogFile, binPath, now)
 	}
-	if paths.UserMode {
-		return scheduleUserModeUpdateInstall(paths, binPath)
+	if err == nil && beforeExit != nil {
+		beforeExit()
 	}
-	return scheduleUnixUpdateInstall(paths.ServiceName, paths.LogFile, binPath, now)
+	return method, err
 }
 
 // fetchUpdateBinary 通过更新专用 HTTP 客户端下载目标版本二进制到配置目录，
@@ -556,6 +581,10 @@ func ApplyScheduledUpdate(buildVersion string) error {
 }
 
 func scheduleUserModeUpdateInstall(paths Paths, binPath string) (string, error) {
+	return scheduleUserModeUpdateWithExit(paths, binPath, nil, func(delay time.Duration, fn func()) { time.AfterFunc(delay, fn) }, os.Exit)
+}
+
+func scheduleUserModeUpdateWithExit(paths Paths, binPath string, beforeExit func(), after func(time.Duration, func()), exit func(int)) (string, error) {
 	if paths.BinaryFile == "" {
 		return "", errors.New("installed binary path is empty")
 	}
@@ -574,8 +603,11 @@ func scheduleUserModeUpdateInstall(paths Paths, binPath string) (string, error) 
 		_ = os.Remove(staged)
 		return "", err
 	}
-	time.AfterFunc(autoUpdateDelay, func() {
-		os.Exit(42)
+	after(autoUpdateDelay, func() {
+		if beforeExit != nil {
+			beforeExit()
+		}
+		exit(42)
 	})
 	return "self-replace", nil
 }

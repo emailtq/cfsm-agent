@@ -41,45 +41,53 @@ type terminalManager struct {
 	limit    int
 	factory  terminalFactory
 	sessions map[string]*terminalSession
+	owned    map[*terminalSession]struct{}
 }
 
 func newTerminalManager(limit int, factory terminalFactory) *terminalManager {
 	if limit < 1 || limit > terminalMaxSessions {
 		limit = terminalMaxSessions
 	}
-	return &terminalManager{limit: limit, factory: factory, sessions: make(map[string]*terminalSession)}
+	return &terminalManager{limit: limit, factory: factory, sessions: make(map[string]*terminalSession), owned: make(map[*terminalSession]struct{})}
 }
 
 // Open takes ownership of a fresh, unshared peer, including rejected admissions.
 func (m *terminalManager) Open(ctx context.Context, id string, peer terminalPeer, cols, rows uint16) error {
+	_, err := m.open(ctx, id, peer, cols, rows)
+	return err
+}
+
+func (m *terminalManager) open(ctx context.Context, id string, peer terminalPeer, cols, rows uint16) (*terminalSession, error) {
 	if ctx == nil || peer == nil || m.factory == nil || !terminalIDRE.MatchString(id) || !validateTerminalSize(int(cols), int(rows)) {
 		if peer != nil {
 			_ = peer.Close()
 		}
-		return errors.New("invalid terminal session")
+		return nil, errors.New("invalid terminal session")
 	}
 	if err := ctx.Err(); err != nil {
 		_ = peer.Close()
-		return err
+		return nil, err
 	}
 	m.mu.Lock()
-	if m.sessions[id] != nil || len(m.sessions) >= m.limit {
+	// Bound retained cleanup/factories too, while allowing immediate cancelled-slot reuse.
+	if m.sessions[id] != nil || len(m.sessions) >= m.limit || len(m.owned) >= 2*m.limit {
 		m.mu.Unlock()
 		_ = peer.Close()
-		return errors.New("terminal session unavailable")
+		return nil, errors.New("terminal session unavailable")
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	s := &terminalSession{manager: m, id: id, peer: peer, ctx: sctx, cancel: cancel, done: make(chan struct{}), started: make(chan struct{}), input: make(chan []byte, 16), output: make(chan terminalOutput, 16), ackWake: make(chan struct{}, 1), creditWake: make(chan struct{}, 1), stallWake: make(chan struct{}, 1), controls: make(chan []byte, 1)}
 	m.sessions[id] = s
+	m.owned[s] = struct{}{}
 	m.mu.Unlock()
 	result := make(chan error, 1)
 	go s.run(cols, rows, result)
 	select {
 	case err := <-result:
-		return err
+		return s, err
 	case <-sctx.Done():
 		s.stop()
-		return sctx.Err()
+		return s, sctx.Err()
 	}
 }
 
@@ -98,8 +106,8 @@ func (m *terminalManager) Close(id string) error {
 
 func (m *terminalManager) CloseAll(reason string) {
 	m.mu.Lock()
-	sessions := make([]*terminalSession, 0, len(m.sessions))
-	for _, s := range m.sessions {
+	sessions := make([]*terminalSession, 0, len(m.owned))
+	for s := range m.owned {
 		sessions = append(sessions, s)
 	}
 	m.mu.Unlock()
@@ -163,7 +171,12 @@ func (s *terminalSession) joinStarted() {
 }
 
 func (s *terminalSession) run(cols, rows uint16, result chan<- error) {
-	defer close(s.done)
+	defer func() {
+		s.manager.mu.Lock()
+		close(s.done)
+		delete(s.manager.owned, s)
+		s.manager.mu.Unlock()
+	}()
 	p, err := s.manager.factory(cols, rows)
 	close(s.started)
 	if p == nil {

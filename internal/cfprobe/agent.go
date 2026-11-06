@@ -27,6 +27,13 @@ type Agent struct {
 	log     logger
 	version string
 	ctx     context.Context
+	// cfgMu protects synchronous identity-change cancellation, including coalesced A-B-A changes.
+	terminalControlCancel context.CancelFunc
+	terminalMu            sync.Mutex
+	terminalCancel        context.CancelFunc
+	terminalDone          chan struct{}
+	terminalStopped       bool
+	terminalChanged       chan struct{}
 
 	// 自动建号失败后置位：本次运行不再重试建号，也不再上报（空 id 的上报必然 404）。
 	discoveryFailed atomic.Bool
@@ -64,9 +71,9 @@ type Agent struct {
 	updateMu         sync.Mutex
 	// configWriteMu 串行化配置文件写入：动态配置下发与 UA 下发是两条独立通道，
 	// 并发写会把对方的字段覆盖回旧值。
-	configWriteMu    sync.Mutex
-	reporter         *reportTransport
-	reportMu         sync.Mutex
+	configWriteMu sync.Mutex
+	reporter      *reportTransport
+	reportMu      sync.Mutex
 	// reportFailures 是 WSS 与 POST 共用的连续失败计数：握手 401/403、WSS error 帧、
 	// POST 4xx/5xx、WS close 1008 都计入，任意一次成功（POST 2xx、非实时提示 ack、
 	// 或 WSS 握手通过）清零。
@@ -233,14 +240,17 @@ func Run(configFile string, debug bool, version string) error {
 	defer stop()
 
 	a := &Agent{
-		cfg:          cfg,
-		paths:        paths,
-		log:          newLogger(debug),
-		version:      version,
-		ctx:          ctx,
-		wake:         make(chan struct{}, 1),
-		remoteConfig: make(chan remoteConfigRequest, 4),
+		cfg:             cfg,
+		paths:           paths,
+		log:             newLogger(debug),
+		version:         version,
+		ctx:             ctx,
+		wake:            make(chan struct{}, 1),
+		remoteConfig:    make(chan remoteConfigRequest, 4),
+		terminalChanged: make(chan struct{}, 1),
 	}
+	a.startTerminal(ctx)
+	defer a.stopTerminal()
 	a.resetNetworkBaseline(cfg.Interface)
 	a.reporter = newReportTransport(a)
 	a.basic = collectBasicStats()
@@ -262,6 +272,7 @@ func Run(configFile string, debug bool, version string) error {
 		a.log.debugf("auto update disabled: local AUTO_UPDATE=0")
 	}
 	err = a.loop(ctx)
+	a.stopTerminal()
 	if errors.Is(err, ErrAutoDiscoveryFailed) && serviceSystem(paths) == "procd" {
 		// procd 的 respawn 不区分退出码，先删除运行实例，避免自动发现失败后被重新拉起。
 		payload := fmt.Sprintf(`{"name":%q}`, paths.ServiceName)
@@ -423,8 +434,12 @@ func (a *Agent) requestContext() context.Context {
 
 func (a *Agent) setConfig(cfg Config) {
 	a.cfgMu.Lock()
+	if !terminalIdentityEqual(a.cfg, cfg) && a.terminalControlCancel != nil {
+		a.terminalControlCancel()
+	}
 	a.cfg = cfg
 	a.cfgMu.Unlock()
+	terminalWake(a.terminalChanged)
 }
 
 // reportPauseRemaining 返回距离恢复上报的剩余时间，<=0 表示未暂停。

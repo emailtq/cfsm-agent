@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestStoppedAgentDoesNotSendPOSTRequests(t *testing.T) {
@@ -27,5 +28,31 @@ func TestStoppedAgentDoesNotSendPOSTRequests(t *testing.T) {
 	}
 	if len(requests) != 0 {
 		t.Fatal("stopped agent still sent a POST request")
+	}
+}
+
+func TestReportContextTerminalStopJoinsOwnedWorker(t *testing.T) {
+	for _, reason := range []string{"normal_stop", "discovery_failure", "update"} {
+		t.Run(reason, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			a := &Agent{terminalCancel: cancel, terminalDone: make(chan struct{})}
+			cleaning, release := make(chan struct{}), make(chan struct{})
+			go func() { <-ctx.Done(); close(cleaning); <-release; close(a.terminalDone) }()
+			stopped := make(chan struct{})
+			go func() { a.stopTerminal(); close(stopped) }()
+			<-cleaning
+			select {
+			case <-stopped:
+				t.Fatal("stop returned before owned worker cleanup")
+			case <-time.After(10 * time.Millisecond):
+			}
+			close(release)
+			select {
+			case <-stopped:
+			case <-time.After(time.Second):
+				t.Fatal("stop failed to join")
+			}
+			a.stopTerminal()
+		})
 	}
 }

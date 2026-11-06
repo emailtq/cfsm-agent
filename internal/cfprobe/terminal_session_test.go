@@ -94,6 +94,78 @@ func newSessionTestProcess() *sessionTestProcess {
 	r, w := io.Pipe()
 	return &sessionTestProcess{reader: r, output: w, closed: make(chan struct{})}
 }
+
+type sessionCleanupGateProcess struct {
+	*sessionTestProcess
+	closing, release chan struct{}
+	gateOnce         sync.Once
+}
+
+func (p *sessionCleanupGateProcess) Close() error {
+	p.gateOnce.Do(func() { close(p.closing) })
+	<-p.release
+	return p.sessionTestProcess.Close()
+}
+
+func TestTerminalSessionCloseAllJoinsRemovedCleanup(t *testing.T) {
+	p := &sessionCleanupGateProcess{sessionTestProcess: newSessionTestProcess(), closing: make(chan struct{}), release: make(chan struct{})}
+	m := newTerminalManager(4, func(uint16, uint16) (terminalProcess, error) { return p, nil })
+	peer := newSessionTestPeer()
+	sessionOpen(t, m, "owned", peer)
+	m.mu.Lock()
+	owned := m.sessions["owned"]
+	m.mu.Unlock()
+	defer func() { close(p.release); <-owned.done }()
+	_ = peer.Close()
+	select {
+	case <-p.closing:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start")
+	}
+	if m.Count() != 0 {
+		t.Fatal("fixture did not remove live session")
+	}
+	done := make(chan struct{})
+	go func() { m.CloseAll("shutdown"); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("CloseAll returned before owned cleanup completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestTerminalSessionCancelledFactoryOwnershipBounded(t *testing.T) {
+	gate := make(chan struct{})
+	var entered atomic.Int32
+	m := newTerminalManager(1, func(uint16, uint16) (terminalProcess, error) {
+		entered.Add(1)
+		<-gate
+		return newSessionTestProcess(), nil
+	})
+	defer func() {
+		close(gate)
+		sessionEventually(t, func() bool { m.mu.Lock(); defer m.mu.Unlock(); return len(m.owned) == 0 })
+	}()
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithCancel(t.Context())
+		result := make(chan error, 1)
+		go func() { result <- m.Open(ctx, "same", newSessionTestPeer(), 80, 24) }()
+		sessionEventually(t, func() bool { return entered.Load() == int32(i+1) })
+		cancel()
+		if err := <-result; err == nil {
+			t.Fatal("cancelled factory accepted")
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+	if err := m.Open(ctx, "third", newSessionTestPeer(), 80, 24); err == nil {
+		t.Fatal("unbounded late factories admitted")
+	}
+	if entered.Load() != 2 {
+		t.Fatal("ownership bound applied after spawn")
+	}
+	m.CloseAll("shutdown")
+}
 func (p *sessionTestProcess) Read(b []byte) (int, error) {
 	n, err := p.reader.Read(b)
 	p.reads.Add(int64(n))

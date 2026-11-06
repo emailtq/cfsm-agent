@@ -15,10 +15,30 @@ func newDiscoveryTestAgent(t *testing.T, cfg Config) *Agent {
 	t.Helper()
 	dir := t.TempDir()
 	return &Agent{
-		cfg:   cfg,
-		log:   newLogger(false),
-		wake:  make(chan struct{}, 1),
-		paths: Paths{ConfigDir: dir, ConfigFile: filepath.Join(dir, "config.conf"), TrafficFile: filepath.Join(dir, "traffic.dat")},
+		cfg:             cfg,
+		log:             newLogger(false),
+		wake:            make(chan struct{}, 1),
+		terminalChanged: make(chan struct{}, 1),
+		paths:           Paths{ConfigDir: dir, ConfigFile: filepath.Join(dir, "config.conf"), TrafficFile: filepath.Join(dir, "traffic.dat")},
+	}
+}
+
+func TestAutoDiscoveryTerminalWakeDoesNotConsumeReportingWake(t *testing.T) {
+	a := newDiscoveryTestAgent(t, Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), WorkerURL: "https://example.invalid"})
+	a.reporter = &reportTransport{agent: a}
+	a.applyAutoDiscoveryHeaders(discoveryHeaders(agentAutoDiscoveryCreated, "node"))
+	select {
+	case <-a.terminalChanged:
+	default:
+		t.Fatal("binding did not wake terminal worker")
+	}
+	select {
+	case <-a.wake:
+	default:
+		t.Fatal("terminal wake consumed reporting event")
+	}
+	if !a.discoveryJustBound.Load() || a.configSnapshot().ServerID != "node" {
+		t.Fatal("binding/report synchronization damaged")
 	}
 }
 
