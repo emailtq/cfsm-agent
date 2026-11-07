@@ -102,6 +102,8 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 | `-ping_mode=tcp\|icmp` | Ping 探测模式；`tcp` 使用 TCP 连接探测，`icmp` 使用 ICMP 探测；两者均每 20 秒采样一次并按 2 分钟窗口聚合 | `tcp` |
 | `-ua=UA` | 上报请求使用的 User-Agent；仅允许字母、数字、空格与 `. _ - / , : ; ( ) + = @ # * ? ~`，≤100 字符。服务端可通过 `X-Ua`（HTTP）或 WSS ack 的 `ua` 字段覆盖，以面板设置为准 | `cfsm` |
 | `-auto_update=0\|1` | 是否开启自动检查更新 | `0` |
+| `-terminal=0\|1` | 仅本地 Linux 终端知情同意；远程配置不能开启 | `0` |
+| `-terminal-token-file=PATH` | 独立节点 token 的绝对路径 owner-only 普通文件，不传 token 文本 | 空 |
 | `-rx_correction=N` | 下行流量校正，单位 GB | 空 |
 | `-tx_correction=N` | 上行流量校正，单位 GB | 空 |
 | `-debug=0\|1` | 是否开启调试日志 | `0` |
@@ -115,6 +117,30 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 普通用户安装时，自动更新会在 `~/.cf-probe/` 内下载并替换当前用户的二进制，随后退出当前进程，由 `systemd --user` 或 macOS LaunchAgent 按服务重启策略拉起新版本；不会触碰 root 路径或系统级服务。
 
 更新检查（`api.github.com`）、新二进制下载（`github.com`）、指标上报以及公网 IP 查询的 DNS 解析默认使用系统原生 DNS；仅在配置了 `--install-ghproxy`（通常为系统 DNS 被污染的国内服务器）或通过环境变量 `CF_PROBE_UPDATE_DNS` 显式指定 DNS 服务器时，才启用 Agent 内置的公共 DNS 轮询解析（阿里、DNSPod、114、Cloudflare、Google，UDP 53），此时不依赖系统 DNS，内置 DNS 全部不可用时回退系统 DNS。`CF_PROBE_UPDATE_DNS` 会自动补全 `:53` 端口（如 `CF_PROBE_UPDATE_DNS=223.5.5.5`）。root/system 模式更新时 Agent 会把新二进制下载到配置目录，再调度新二进制执行自身的 `install` 完成替换并重启服务；普通用户模式按上一段直接自替换。两种模式都不经过 install.sh 和 curl；下载或调度失败时旧版本不受影响，下次检查自动重试。如 `github.com` 完全不可达，可配置 `--install-ghproxy` 代理（仅用于二进制文件下载；`api.github.com` 的版本检查始终直连，gh-proxy 类服务不支持 API 转发）。
+
+## 可选 Linux 终端
+
+终端默认关闭，不是 SSH，也不复用 reporting `SECRET`。需要支持终端的 Worker、内置同源管理员后台、显式站点/节点授权及本地 `-terminal=1` 同时生效。先发布默认关闭的后端，再更新知情同意的测试 Agent，最后显式授权/启用。首次没有节点 token 时保持本地关闭；从后台安全获取一次性 token 后再配置。远程配置、指标 payload 和配置 MD5 不携带或覆盖这两个本地参数。
+
+安全准备 token 文件：绝对路径、所属用户独占可读写（例如 mode `600`）、普通文件，拒绝 symlink/FIFO 和非 owner 文件。内容须恰好为后台签发的 64 个 lowercase hex 字符（即恰好 64 字节），不允许末尾换行或其他空白。不要把 token 放进 shell 命令/history、环境变量、截图、日志或仓库；配置文件也应仅所属用户可读，Shell 能读取同一用户的文件，不是沙箱。
+
+在已有配置的 Agent 上启用（只有路径，不包含 token）：
+
+```bash
+cf-probe install -terminal=1 -terminal-token-file=/absolute/path/node-token
+```
+
+既有 `install.sh` 直接转发这些参数，无需新 wrapper；Windows `install.ps1` 仍支持普通监控，显式终端启用会被拒绝。重装省略参数保留已有值；关闭必须显式 `cf-probe install -terminal=0`，不能仅删除原 token 文件来关闭已经保存的 opt-in。
+
+V1 仅通过能力预检的 Linux：可用 HOME、Shell、`/bin/sleep`、proc/pidfd/ptmx、descriptor duplication/poll、可取消 PTY I/O。ENOSYS/EPERM/缺失能力时不宣告支持、不开 Shell，监控继续。其他 OS 和普通 Linux 监控要求不提高；交叉编译成功不是该 OS 的 PTY 验收。Agent root 服务意味着 root Shell，优先非 root，并取得知情同意。
+
+每节点最多四个独立 PTY，从 Agent 用户 HOME 启动固定无凭据环境，不继承服务凭据或 bash profile/rc。会话目录/env 独立；关 S1 不关 S2。16 KiB data / 4 KiB control，每会话每向 256 KiB credit，四会话每端 2 MiB outstanding 应用数据（不是总 heap），有界生产者和累计 ACK 批处理。输入实际写入后 ACK，写超时 8 秒；无 ACK 进展/配对截止 30 秒，启动写 5 秒。输出不延长 30 分钟用户空闲；管理员租约 60 秒、UI 每 45 秒续约。
+
+HTTP 上报、inactive report-WSS hours 不停止独立控制通道。控制连接断开/替换、身份变化、退出/升级、登出、撤销/轮换、节点删除和续约失败结束相关 Shell。没有 detached 恢复、输入重放或自动重建；必须手动重开。普通 same-SID 子进程安全清理有回归验证，不承诺 `setsid` 逃逸或不合作 OS/factory 的 containment；Cloudflare alarm 延迟不承诺严格第 60 秒物理关闭。
+
+Worker 只保留七天生命周期审计，不存终端 bytes/命令；备份不携带终端凭据且恢复不激活权限。仅内置同源后台可用，自定义前端/preview 与启用终端互斥（普通 CSS 可用）；旧管理员 JWT 缺 `jti` 应重新登录。回滚先在后台关闭站点/撤销节点，再本地 `-terminal=0`；保留 additive D1 tables、`terminal-v1` migration 历史及监控配置，不删除旧 migration tag。
+
+本地测试用 `go test ./... -count=1`、Linux 非 root `go test -race ./...`、`go vet ./...`；既有 build/release/snapshot 复用三平台测试 workflow。真实非生产 Cloudflare、多节点 PTY、公网时延、hibernation/eviction 和 billing 仍需环境与授权，本地 TLS/fake process 或 WSL 不替代云验收；物理手机 IME/键盘细化 deferred/unverified。
 
 ## 支持的架构
 
