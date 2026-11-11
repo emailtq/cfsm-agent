@@ -22,39 +22,44 @@ const (
 
 // Roles identify the sender, matching the Worker's V1 contract.
 var terminalRoleTypes = map[string][]string{
-	"agent-control":  {"hello", "ping", "pong"},
-	"broker-control": {"open", "close", "ping", "pong"},
+	"agent-control":  {"hello", "disabled", "ping", "pong"},
+	"broker-control": {"open", "close", "bound", "disable", "ping", "pong"},
 	"browser":        {"resize", "ack", "ping", "pong"},
 	"agent":          {"ready", "ack", "exit", "error", "ping", "pong"},
 	"broker":         {"start", "ready", "resize", "ack", "exit", "error", "ping", "pong"},
 }
 
 var terminalControlFields = map[string][]string{
-	"hello":  {"type", "protocol", "platform", "capabilities"},
-	"open":   {"type", "protocol", "sessionId", "ticket", "cols", "rows"},
-	"close":  {"type", "sessionId", "reason"},
-	"start":  {"type", "cols", "rows"},
-	"resize": {"type", "cols", "rows"},
-	"ack":    {"type", "bytes"},
-	"exit":   {"type", "code"},
-	"error":  {"type", "code"},
-	"ready":  {"type"}, "ping": {"type"}, "pong": {"type"},
+	"hello":    {"type", "protocol", "platform", "capabilities"},
+	"open":     {"type", "protocol", "sessionId", "ticket", "cols", "rows"},
+	"close":    {"type", "sessionId", "reason"},
+	"bound":    {"type", "serverId", "connectionId", "generation", "credentialVersion"},
+	"disable":  {"type", "operationId", "serverId", "connectionId", "generation", "credentialVersion"},
+	"disabled": {"type", "operationId", "serverId", "connectionId", "generation", "credentialVersion"},
+	"start":    {"type", "cols", "rows"},
+	"resize":   {"type", "cols", "rows"},
+	"ack":      {"type", "bytes"},
+	"exit":     {"type", "code"},
+	"error":    {"type", "code"},
+	"ready":    {"type"}, "ping": {"type"}, "pong": {"type"},
 }
 
 var terminalIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 var terminalCodeRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 type terminalControl struct {
-	Type         string
-	Protocol     int
-	Platform     string
-	Capabilities []string
-	SessionID    string
-	Ticket       string
-	Cols, Rows   int
-	Bytes        int64
-	ExitCode     int
-	Code, Reason string
+	Type                                string
+	Protocol                            int
+	Platform                            string
+	Capabilities                        []string
+	SessionID                           string
+	Ticket                              string
+	Cols, Rows                          int
+	Bytes                               int64
+	ExitCode                            int
+	Code, Reason                        string
+	ServerID, ConnectionID, OperationID string
+	Generation, CredentialVersion       int64
 }
 
 func validateTerminalSize(cols, rows int) bool {
@@ -110,7 +115,13 @@ func parseTerminalControl(text []byte, role string) (terminalControl, error) {
 	case "hello":
 		protocol, ok := number("protocol", 1, 1)
 		frame.Protocol, frame.Platform = int(protocol), str("platform")
-		valid = ok && frame.Platform == "linux" && json.Unmarshal(fields["capabilities"], &frame.Capabilities) == nil && len(frame.Capabilities) == 1 && frame.Capabilities[0] == "terminal.pty.v1"
+		valid = ok && frame.Platform == "linux" && json.Unmarshal(fields["capabilities"], &frame.Capabilities) == nil && (len(frame.Capabilities) == 1 || len(frame.Capabilities) == 2) && frame.Capabilities[0] == "terminal.pty.v1" && (len(frame.Capabilities) == 1 || frame.Capabilities[1] == "terminal.disable.v1")
+	case "bound", "disable", "disabled":
+		frame.ServerID, frame.ConnectionID, frame.OperationID = str("serverId"), str("connectionId"), str("operationId")
+		generation, genOK := number("generation", 1, terminalMaxSafeInteger)
+		version, verOK := number("credentialVersion", 1, terminalMaxSafeInteger)
+		frame.Generation, frame.CredentialVersion = generation, version
+		valid = genOK && verOK && terminalIDRE.MatchString(frame.ServerID) && terminalIDRE.MatchString(frame.ConnectionID) && (frame.Type == "bound" || terminalIDRE.MatchString(frame.OperationID))
 	case "open":
 		protocol, ok := number("protocol", 1, 1)
 		frame.Protocol, frame.SessionID, frame.Ticket = int(protocol), str("sessionId"), str("ticket")

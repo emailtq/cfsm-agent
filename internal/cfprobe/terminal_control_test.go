@@ -189,7 +189,7 @@ func TestTerminalControlTLSHelper(t *testing.T) {
 			if control.id != "" || control.auth != "Bearer "+strings.Repeat("a", 64) || control.node != "node" || control.ticket != "" || control.query != "" {
 				t.Fatal("control identity/header isolation")
 			}
-			if frame := controlTLSRead(t, control.peer); string(frame.data) != `{"type":"hello","protocol":1,"platform":"linux","capabilities":["terminal.pty.v1"]}` {
+			if frame := controlTLSRead(t, control.peer); string(frame.data) != `{"type":"hello","protocol":1,"platform":"linux","capabilities":["terminal.pty.v1","terminal.disable.v1"]}` {
 				t.Fatalf("hello %s", frame.data)
 			}
 			defer control.peer.Close()
@@ -506,7 +506,7 @@ func TestTerminalControlStartAdmissionAndCancellation(t *testing.T) {
 	go func() { defer close(done); a.runTerminalWorker(ctx, opts) }()
 	defer func() { cancel(); <-done }()
 	f := sessionFrame(t, control)
-	if string(f.data) != `{"type":"hello","protocol":1,"platform":"linux","capabilities":["terminal.pty.v1"]}` {
+	if string(f.data) != `{"type":"hello","protocol":1,"platform":"linux","capabilities":["terminal.pty.v1","terminal.disable.v1"]}` {
 		t.Fatalf("hello=%s", f.data)
 	}
 	open := []byte(`{"type":"open","protocol":1,"sessionId":"S1","ticket":"` + strings.Repeat("b", 64) + `","cols":80,"rows":24}`)

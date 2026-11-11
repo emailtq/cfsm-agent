@@ -588,6 +588,8 @@ func (a *Agent) applyAutoDiscoveryHeaders(headers http.Header) {
 		if serverID == "" {
 			return
 		}
+		a.configWriteMu.Lock()
+		defer a.configWriteMu.Unlock()
 		cfg := a.configSnapshot()
 		if cfg.ServerID == serverID {
 			return
@@ -782,6 +784,8 @@ func (a *Agent) persistPendingServerID() {
 	if a == nil || a.pendingPersistID == "" {
 		return
 	}
+	a.configWriteMu.Lock()
+	defer a.configWriteMu.Unlock()
 	if err := writeConfig(a.paths.ConfigFile, a.configSnapshot()); err != nil {
 		return
 	}
@@ -1413,7 +1417,11 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		}
 		// 与 UA 下发通道串行化：UA 不参与 md5，写盘时保留当前值，避免互相覆盖。
 		a.configWriteMu.Lock()
-		nextCfg.UA = a.configSnapshot().UA
+		current := a.configSnapshot()
+		nextCfg.UA = current.UA
+		// A queued remote update must not restore a pre-disable installation snapshot.
+		nextCfg.TerminalEnabled, nextCfg.TerminalToken = current.TerminalEnabled, current.TerminalToken
+		nextCfg.ServerID, nextCfg.WorkerURL = current.ServerID, current.WorkerURL
 		writeErr := writeConfig(a.paths.ConfigFile, nextCfg)
 		if writeErr == nil {
 			a.setConfig(nextCfg)

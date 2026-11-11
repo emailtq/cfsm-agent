@@ -2,6 +2,7 @@ package cfprobe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -67,8 +68,6 @@ func (a *Agent) terminalWorker(ctx context.Context) {
 }
 
 func (a *Agent) runTerminalWorker(ctx context.Context, opts terminalControlOptions) {
-	manager := newTerminalManager(terminalMaxSessions, opts.factory)
-	defer manager.CloseAll("shutdown")
 	retry := opts.retryMin
 	var generation uint64
 	for ctx.Err() == nil {
@@ -86,6 +85,7 @@ func (a *Agent) runTerminalWorker(ctx context.Context, opts terminalControlOptio
 			continue
 		}
 		generation++
+		manager := newTerminalManager(terminalMaxSessions, opts.factory)
 		connected := a.terminalGeneration(ctx, cfg, generation, manager, opts)
 		if connected {
 			retry = opts.retryMin
@@ -122,6 +122,7 @@ type terminalControlGeneration struct {
 	number     uint64
 	admissions map[string]*terminalAdmission
 	wg         sync.WaitGroup
+	disabled   bool
 }
 
 func (a *Agent) terminalGeneration(root context.Context, cfg Config, number uint64, manager *terminalManager, opts terminalControlOptions) bool {
@@ -150,7 +151,7 @@ func (a *Agent) terminalGeneration(root context.Context, cfg Config, number uint
 	stop := context.AfterFunc(ctx, func() { _ = peer.Close() })
 	defer stop()
 	defer peer.Close()
-	if peer.WriteText([]byte(`{"type":"hello","protocol":1,"platform":"linux","capabilities":["terminal.pty.v1"]}`), terminalWriteTimeout) != nil {
+	if peer.WriteText([]byte(`{"type":"hello","protocol":1,"platform":"linux","capabilities":["terminal.pty.v1","terminal.disable.v1"]}`), terminalWriteTimeout) != nil {
 		return false
 	}
 	writerDone := make(chan struct{})
@@ -176,6 +177,7 @@ func (a *Agent) terminalGeneration(root context.Context, cfg Config, number uint
 		}
 	}()
 	defer func() { cancel(); <-writerDone }()
+	var binding *terminalControl
 	for ctx.Err() == nil {
 		if peer.SetReadDeadline(time.Now().Add(opts.readTimeout)) != nil {
 			break
@@ -189,6 +191,28 @@ func (a *Agent) terminalGeneration(root context.Context, cfg Config, number uint
 			break
 		}
 		switch frame.Type {
+		case "bound":
+			if binding != nil || frame.ServerID != cfg.ServerID {
+				return true
+			}
+			binding = &frame
+		case "disable":
+			if binding == nil || frame.ServerID != binding.ServerID || frame.ConnectionID != binding.ConnectionID || frame.Generation != binding.Generation || frame.CredentialVersion != binding.CredentialVersion {
+				return true
+			}
+			if !g.disable(a, manager) {
+				return true
+			}
+			ack, _ := json.Marshal(struct {
+				Type              string `json:"type"`
+				OperationID       string `json:"operationId"`
+				ServerID          string `json:"serverId"`
+				ConnectionID      string `json:"connectionId"`
+				Generation        int64  `json:"generation"`
+				CredentialVersion int64  `json:"credentialVersion"`
+			}{"disabled", frame.OperationID, frame.ServerID, frame.ConnectionID, frame.Generation, frame.CredentialVersion})
+			_ = peer.WriteText(ack, terminalWriteTimeout)
+			return true
 		case "open":
 			g.admit(frame, manager, opts, a)
 		case "close":
@@ -211,10 +235,56 @@ func (a *Agent) terminalGeneration(root context.Context, cfg Config, number uint
 	return true
 }
 
+func (g *terminalControlGeneration) disable(a *Agent, manager *terminalManager) bool {
+	a.configWriteMu.Lock()
+	defer a.configWriteMu.Unlock()
+	a.cfgMu.Lock()
+	// The cancellation check also rejects an A-B-A reinstall on this old control.
+	if g.ctx.Err() != nil || !terminalIdentityEqual(g.cfg, a.cfg) || !a.cfg.TerminalEnabled {
+		a.cfgMu.Unlock()
+		return false
+	}
+	// A local reinstall can replace disk configuration before an old process observes it.
+	persisted, err := readConfig(a.paths.ConfigFile)
+	if err != nil || !terminalIdentityEqual(g.cfg, persisted) {
+		a.cfgMu.Unlock()
+		return false
+	}
+	next := a.cfg
+	next.TerminalEnabled = false
+	if writeConfig(a.paths.ConfigFile, next) != nil {
+		a.cfgMu.Unlock()
+		return false
+	}
+	a.cfg = next
+	a.cfgMu.Unlock()
+	g.mu.Lock()
+	g.disabled = true
+	for _, admission := range g.admissions {
+		admission.cancel()
+	}
+	g.mu.Unlock()
+	// No ACK until even cancelled factories and removed-session cleanup have joined.
+	deadline := time.Now().Add(4 * time.Second)
+	if !manager.disable(time.Until(deadline)) {
+		return false
+	}
+	joined := make(chan struct{})
+	go func() { g.wg.Wait(); close(joined) }()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-joined:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func (g *terminalControlGeneration) admit(frame terminalControl, manager *terminalManager, opts terminalControlOptions, a *Agent) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.ctx.Err() != nil || g.admissions[frame.SessionID] != nil || len(g.admissions) >= terminalMaxSessions {
+	if g.disabled || g.ctx.Err() != nil || g.admissions[frame.SessionID] != nil || len(g.admissions) >= terminalMaxSessions {
 		return false
 	}
 	ctx, cancel := context.WithCancel(g.ctx)

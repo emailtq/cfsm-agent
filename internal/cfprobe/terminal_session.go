@@ -42,6 +42,7 @@ type terminalManager struct {
 	factory  terminalFactory
 	sessions map[string]*terminalSession
 	owned    map[*terminalSession]struct{}
+	disabled bool
 }
 
 func newTerminalManager(limit int, factory terminalFactory) *terminalManager {
@@ -70,7 +71,7 @@ func (m *terminalManager) open(ctx context.Context, id string, peer terminalPeer
 	}
 	m.mu.Lock()
 	// Bound retained cleanup/factories too, while allowing immediate cancelled-slot reuse.
-	if m.sessions[id] != nil || len(m.sessions) >= m.limit || len(m.owned) >= 2*m.limit {
+	if m.disabled || m.sessions[id] != nil || len(m.sessions) >= m.limit || len(m.owned) >= 2*m.limit {
 		m.mu.Unlock()
 		_ = peer.Close()
 		return nil, errors.New("terminal session unavailable")
@@ -117,6 +118,29 @@ func (m *terminalManager) CloseAll(reason string) {
 	for _, s := range sessions {
 		s.joinStarted()
 	}
+}
+
+func (m *terminalManager) disable(timeout time.Duration) bool {
+	m.mu.Lock()
+	m.disabled = true
+	sessions := make([]*terminalSession, 0, len(m.owned))
+	for s := range m.owned {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+	for _, s := range sessions {
+		s.stop()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for _, s := range sessions {
+		select {
+		case <-s.done:
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
 }
 
 type terminalOutput struct {
