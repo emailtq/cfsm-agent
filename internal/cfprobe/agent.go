@@ -981,6 +981,7 @@ func (a *Agent) buildReportBodyForConfig(cfg Config, m Metrics, reportAt time.Ti
 		"metrics":          a.metricsForReport(m, reportAt),
 		"collect_interval": cfg.CollectInterval,
 		"report_interval":  cfg.ReportInterval,
+		"terminal_enabled": cfg.TerminalEnabled,
 	}
 	// 仅在自动发现阶段有意义：服务端建号时用它作为服务器名称。
 	// 绑定 id 之后不再发送，避免每次上报都带一个无用的字段。

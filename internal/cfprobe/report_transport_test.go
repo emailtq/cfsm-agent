@@ -75,8 +75,19 @@ func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(before, after) || strings.Contains(string(before), token) || strings.Contains(strings.ToLower(string(before)), "terminal") {
-		t.Fatal("local terminal fields changed metric/config-MD5 wire payload")
+	var enabledReport, disabledReport map[string]any
+	if json.Unmarshal(before, &enabledReport) != nil || json.Unmarshal(after, &disabledReport) != nil {
+		t.Fatal("invalid report JSON")
+	}
+	if enabledReport["terminal_enabled"] != true || disabledReport["terminal_enabled"] != false {
+		t.Fatal("report must expose the cfg snapshot's strict boolean local terminal state")
+	}
+	delete(enabledReport, "terminal_enabled")
+	delete(disabledReport, "terminal_enabled")
+	enabledBody, _ := json.Marshal(enabledReport)
+	disabledBody, _ := json.Marshal(disabledReport)
+	if !bytes.Equal(enabledBody, disabledBody) || strings.Contains(string(before), token) || strings.Contains(string(after), other.TerminalToken) || strings.Contains(strings.ToLower(string(enabledBody)), "terminal") {
+		t.Fatal("terminal credential leaked or unrelated metric/config-MD5 payload changed")
 	}
 	base := "collect_interval=0&report_interval=120&reset_day=1&schema_version=7&connection_mode=http"
 	for _, field := range []string{"terminal_enabled=1", "terminal_token=" + strings.Repeat("c", 64)} {
@@ -103,6 +114,23 @@ func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
 	wsURL, err := reportWebSocketURLWithConfig(cfg.WorkerURL, configSchemaVersion, cfg.ConfigMD5)
 	if err != nil || strings.Contains(wsURL, token) || strings.Contains(wsURL, "terminal") {
 		t.Fatal("report URL leaked terminal token")
+	}
+}
+
+func TestReportTerminalEnabledUsesSnapshotAndDefaultsFalse(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		agent := Agent{cfg: Config{TerminalEnabled: !enabled, TerminalToken: strings.Repeat("d", 64)}}
+		body, _, err := agent.buildReportBodyForConfig(Config{TerminalEnabled: enabled}, Metrics{}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["terminal_enabled"] != enabled || strings.Contains(string(body), agent.cfg.TerminalToken) {
+			t.Fatal("report used live config/credential instead of the supplied snapshot")
+		}
 	}
 }
 
