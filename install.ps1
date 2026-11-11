@@ -68,6 +68,16 @@ function Get-ArchName {
     }
 }
 
+function Get-PayloadArguments($Arguments, $TerminalSupported) {
+    foreach ($arg in $Arguments) {
+        if ($arg -eq "-terminal=0" -and -not $TerminalSupported) { continue }
+        if ($arg -eq "-terminal=1" -and -not $TerminalSupported) {
+            throw "This Agent version does not support terminal installation."
+        }
+        $arg
+    }
+}
+
 $command = if ($args.Count -gt 0) { $args[0] } else { "install" }
 $payloadArgs = @($args)
 if ($command -in @("uninstall", "remove", "delete", "purge")) {
@@ -93,6 +103,10 @@ Write-Host "  url     : $url"
 
 try {
     Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+    if ($payloadArgs -contains "-terminal=0" -or $payloadArgs -contains "-terminal=1") {
+        $terminalSupported = [bool]((& $tmp help 2>$null) | Select-String -SimpleMatch "-terminal-token-file=")
+        $payloadArgs = @(Get-PayloadArguments $payloadArgs $terminalSupported)
+    }
     if ($args.Count -eq 0) {
         & $tmp install
     } else {

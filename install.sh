@@ -4,6 +4,7 @@ set -eu
 REPO="emailtq/cfsm-agent"
 GITHUB_PROXY=""
 INSTALL_VERSION="latest"
+INSTALL_TERMINAL_TOKEN=""
 
 log() {
     printf '%s\n' "$*"
@@ -29,6 +30,7 @@ for arg in "$@"; do
         --install-ghproxy) need_value_for="proxy" ;;
         --install-version=*) INSTALL_VERSION="${arg#*=}" ;;
         --install-version) need_value_for="version" ;;
+        --install-terminal-token=*) INSTALL_TERMINAL_TOKEN="${arg#*=}" ;;
     esac
 done
 
@@ -142,7 +144,42 @@ run_payload() {
         "$bin" install
         return
     fi
-    "$bin" "$@"
+    terminal_supported=0
+    if terminal_help=$("$bin" help 2>/dev/null); then
+        :
+    else
+        probe_status=$?
+        [ "$probe_status" -ne 126 ] || return 126
+    fi
+    if printf '%s' "$terminal_help" | grep -q -- '-terminal-token-file='; then
+        terminal_supported=1
+    fi
+    terminal_on=0
+    for arg in "$@"; do
+        shift
+        case "$arg" in
+            --install-terminal-token=*) ;;
+            -terminal=0) [ "$terminal_supported" = 0 ] || set -- "$@" "$arg" ;;
+            -terminal=1)
+                [ "$os_name" = linux ] && [ "$terminal_supported" = 1 ] || die "this Agent/platform does not support terminal installation"
+                terminal_on=1
+                set -- "$@" "$arg"
+                ;;
+            *) set -- "$@" "$arg" ;;
+        esac
+    done
+    if [ -n "$INSTALL_TERMINAL_TOKEN" ]; then
+        [ "$terminal_on" = 1 ] || die "terminal credential requires explicit local opt-in"
+        [ "${#INSTALL_TERMINAL_TOKEN}" = 64 ] || die "invalid terminal credential"
+        case "$INSTALL_TERMINAL_TOKEN" in *[!a-f0-9]*) die "invalid terminal credential" ;; esac
+        terminal_file=$(mktemp "${TMPDIR:-/tmp}/cf-probe-terminal.XXXXXXXXXX") || die "cannot create private terminal credential file"
+        chmod 600 "$terminal_file" || die "cannot protect terminal credential file"
+        printf '%s' "$INSTALL_TERMINAL_TOKEN" > "$terminal_file" || die "cannot write terminal credential"
+        set -- "$@" "-terminal-token-file=$terminal_file"
+    fi
+    if "$bin" "$@"; then rc=0; else rc=$?; fi
+    if [ -n "${terminal_file:-}" ]; then rm -f "$terminal_file"; terminal_file=""; fi
+    return "$rc"
 }
 
 run_payload_checked() {
@@ -227,7 +264,8 @@ fi
 tmp_dir="${TMPDIR:-/tmp}"
 tmp="${tmp_dir%/}/cf-probe-bootstrap.$$"
 tmp_err="$tmp.err"
-trap 'rm -f "$tmp" "$tmp_err"' EXIT INT TERM
+terminal_file=""
+trap 'rm -f "$tmp" "$tmp_err"; [ -z "$terminal_file" ] || rm -f "$terminal_file"' EXIT INT TERM
 
 log "CF-Server-Monitor Go Probe bootstrap"
 log "  repo    : $REPO"
