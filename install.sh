@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="huilang-me/cfsm-agent"
+REPO="emailtq/cfsm-agent"
 GITHUB_PROXY=""
 INSTALL_VERSION="latest"
 
