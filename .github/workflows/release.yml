@@ -1,12 +1,22 @@
 name: Release Binaries
 
 on:
+  push:
+    tags:
+      - 'v*'
   release:
     types:
       - published
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.event.release.tag_name || github.ref_name }}
 
 jobs:
   test:
@@ -25,8 +35,6 @@ jobs:
           go-version-file: go.mod
 
       - name: Build release binaries
-        env:
-          VERSION: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -102,8 +110,20 @@ jobs:
       - name: Write checksums
         run: sha256sum dist/* > dist/checksums.txt
 
-      - name: Upload assets
+      - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --repo "${{ github.repository }}" --clobber
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if draft=$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft); then
+              [ "$draft" = true ] || { echo "Refusing to replace a published release" >&2; exit 1; }
+            else
+              gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$VERSION" --notes "Built from the terminal branch. Linux terminal access is opt-in and disabled by default."
+            fi
+          fi
+          gh release upload "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
 
