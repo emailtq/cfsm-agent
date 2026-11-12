@@ -21,7 +21,7 @@ func TestTerminalCapabilityUnsupportedNeverDials(t *testing.T) {
 		calls.Add(1)
 		return nil, errors.New("unexpected")
 	}
-	a := &Agent{cfg: Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
+	a := &Agent{cfg: Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	a.runTerminalWorker(ctx, opts)

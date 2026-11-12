@@ -31,11 +31,11 @@ func defaultTerminalControlOptions() terminalControlOptions {
 
 func terminalLocallyEnabled(cfg Config) bool {
 	_, err := terminalWebSocketURL(cfg.WorkerURL, "")
-	return cfg.TerminalEnabled && validTerminalToken(cfg.TerminalToken) && err == nil
+	return cfg.TerminalEnabled && validNodeToken(cfg.NodeToken) && err == nil
 }
 
 func terminalIdentityEqual(a, b Config) bool {
-	return a.TerminalEnabled == b.TerminalEnabled && a.TerminalToken == b.TerminalToken && a.ServerID == b.ServerID && a.WorkerURL == b.WorkerURL && usePublicDNSResolver(a) == usePublicDNSResolver(b)
+	return a.TerminalEnabled == b.TerminalEnabled && a.NodeToken == b.NodeToken && a.ServerID == b.ServerID && a.WorkerURL == b.WorkerURL && usePublicDNSResolver(a) == usePublicDNSResolver(b)
 }
 
 func (a *Agent) startTerminal(ctx context.Context) {

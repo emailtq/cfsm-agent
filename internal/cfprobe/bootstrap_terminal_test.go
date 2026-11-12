@@ -10,14 +10,14 @@ import (
 	"testing"
 )
 
-func TestBootstrapTerminalTokenFile(t *testing.T) {
+func TestBootstrapNodeTokenFile(t *testing.T) {
 	for _, tc := range []struct {
 		name, supported, flag string
 		ok                    bool
 	}{
 		{"supported", "1", "-terminal=1", true},
 		{"unsupported-on", "0", "-terminal=1", false},
-		{"unsupported-off", "0", "-terminal=0", true},
+		{"unsupported-off", "0", "-terminal=0", false},
 		{"noexec", "126", "-terminal=1", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,9 +38,9 @@ func TestBootstrapTerminalTokenFile(t *testing.T) {
 			fake := filepath.Join(dir, "payload")
 			body := `#!/bin/sh
 if [ "$SUPPORTED" = 126 ]; then exit 126; fi
-if [ "$1" = help ]; then [ "$SUPPORTED" = 0 ] || echo ' -terminal-token-file=PATH'; exit 0; fi
+if [ "$1" = help ]; then [ "$SUPPORTED" = 0 ] || printf '%s\n' ' -token-file=PATH' ' -register-key=KEY'; exit 0; fi
 printf '%s\n' "$@" > "$RESULT/args"
-for arg do case "$arg" in -terminal-token-file=*) f=${arg#*=}; cat "$f" > "$RESULT/token"; stat -c %a "$f" > "$RESULT/mode"; printf '%s' "$f" > "$RESULT/path" ;; esac; done
+for arg do case "$arg" in -token-file=*) f=${arg#*=}; cat "$f" > "$RESULT/token"; stat -c %a "$f" > "$RESULT/mode"; printf '%s' "$f" > "$RESULT/path" ;; esac; done
 `
 			if err := os.WriteFile(fake, []byte(body), 0700); err != nil {
 				t.Fatal(err)
@@ -50,7 +50,7 @@ for arg do case "$arg" in -terminal-token-file=*) f=${arg#*=}; cat "$f" > "$RESU
 			if tc.supported == "1" {
 				value = token
 			}
-			script := "die() { echo error >&2; exit 1; }; os_name=linux; cmd=install; INSTALL_TERMINAL_TOKEN='" + value + "'\n" + source[start:start+end] + "\nrun_payload \"$PAYLOAD\" install --install-terminal-token='" + value + "' " + tc.flag
+			script := "die() { echo error >&2; exit 1; }; os_name=linux; cmd=install; INSTALL_NODE_TOKEN='" + value + "'\n" + source[start:start+end] + "\nrun_payload \"$PAYLOAD\" install --install-node-token='" + value + "' " + tc.flag
 			cmd := exec.Command("sh", "-c", script)
 			cmd.Env = append(os.Environ(), "PAYLOAD="+fake, "RESULT="+dir, "SUPPORTED="+tc.supported, "TMPDIR="+dir)
 			output, err := cmd.CombinedOutput()
@@ -69,7 +69,7 @@ for arg do case "$arg" in -terminal-token-file=*) f=${arg#*=}; cat "$f" > "$RESU
 				return
 			}
 			args, _ := os.ReadFile(filepath.Join(dir, "args"))
-			if strings.Contains(string(args), "--install-terminal-token") {
+			if strings.Contains(string(args), "--install-node-token") {
 				t.Fatal("bootstrap token option reached binary")
 			}
 			if tc.supported == "0" {

@@ -18,7 +18,7 @@ func TestTerminalDisableLinuxOwnedPTYBeforeACKReloadAndReinstall(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	file := filepath.Join(home, "config")
-	cfg := Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update"}
+	cfg := Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update"}
 	if err := writeConfig(file, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestTerminalDisableLinuxOwnedPTYBeforeACKReloadAndReinstall(t *testing.T) {
 	}
 	next := persisted
 	next.TerminalEnabled = true
-	next.TerminalToken = strings.Repeat("c", 64)
+	next.NodeToken = strings.Repeat("c", 64)
 	if err := writeConfig(file, next); err != nil {
 		t.Fatal(err)
 	}

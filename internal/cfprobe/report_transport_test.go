@@ -34,9 +34,9 @@ func TestTerminalBoundedReaderDoesNotLowerReportingLimit(t *testing.T) {
 
 func TestReportWebSocketURLConvertsHTTPUpdateURL(t *testing.T) {
 	tests := map[string]string{
-		"https://example.com/update":        "wss://example.com/update",
-		"http://example.com/update?token=1": "ws://example.com/update?token=1",
-		"wss://example.com/update":          "wss://example.com/update",
+		"https://example.com/update": "wss://example.com/update",
+
+		"wss://example.com/update": "wss://example.com/update",
 	}
 	for raw, want := range tests {
 		got, err := reportWebSocketURL(raw)
@@ -58,7 +58,7 @@ func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
 	cfg.ConnectionMode = connectionModeHTTP
 	cfg.ConfigMD5 = strings.Repeat("b", 32)
 	cfg.TerminalEnabled = true
-	cfg.TerminalToken = token
+	cfg.NodeToken = token
 	agent := Agent{cfg: cfg, paths: Paths{ConfigFile: root + "/config.conf", TrafficFile: root + "/traffic.dat"}, log: newLogger(false)}
 	if err := writeConfig(agent.paths.ConfigFile, cfg); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
 	}
 	other := cfg
 	other.TerminalEnabled = false
-	other.TerminalToken = strings.Repeat("c", 64)
+	other.NodeToken = strings.Repeat("c", 64)
 	comparison := Agent{}
 	after, _, err := comparison.buildReportBodyForConfig(other, Metrics{CPU: "1"}, time.Unix(100, 0))
 	if err != nil {
@@ -86,7 +86,7 @@ func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
 	delete(disabledReport, "terminal_enabled")
 	enabledBody, _ := json.Marshal(enabledReport)
 	disabledBody, _ := json.Marshal(disabledReport)
-	if !bytes.Equal(enabledBody, disabledBody) || strings.Contains(string(before), token) || strings.Contains(string(after), other.TerminalToken) || strings.Contains(strings.ToLower(string(enabledBody)), "terminal") {
+	if !bytes.Equal(enabledBody, disabledBody) || strings.Contains(string(before), token) || strings.Contains(string(after), other.NodeToken) || strings.Contains(strings.ToLower(string(enabledBody)), "terminal") {
 		t.Fatal("terminal credential leaked or unrelated metric/config-MD5 payload changed")
 	}
 	base := "collect_interval=0&report_interval=120&reset_day=1&schema_version=7&connection_mode=http"
@@ -108,7 +108,7 @@ func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
 	}
 	agent.applyRemoteUserAgent("test/1")
 	persisted, err := readConfig(agent.paths.ConfigFile)
-	if err != nil || !persisted.TerminalEnabled || persisted.TerminalToken != token || persisted.ConfigMD5 != strings.Repeat("c", 32) || persisted.UA != "test/1" {
+	if err != nil || !persisted.TerminalEnabled || persisted.NodeToken != token || persisted.ConfigMD5 != strings.Repeat("c", 32) || persisted.UA != "test/1" {
 		t.Fatal("remote merge lost local credential")
 	}
 	wsURL, err := reportWebSocketURLWithConfig(cfg.WorkerURL, configSchemaVersion, cfg.ConfigMD5)
@@ -119,7 +119,7 @@ func TestTerminalFieldsStayLocalAcrossReportingAndRemoteConfig(t *testing.T) {
 
 func TestReportTerminalEnabledUsesSnapshotAndDefaultsFalse(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
-		agent := Agent{cfg: Config{TerminalEnabled: !enabled, TerminalToken: strings.Repeat("d", 64)}}
+		agent := Agent{cfg: Config{TerminalEnabled: !enabled, NodeToken: strings.Repeat("d", 64)}}
 		body, _, err := agent.buildReportBodyForConfig(Config{TerminalEnabled: enabled}, Metrics{}, time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -128,7 +128,7 @@ func TestReportTerminalEnabledUsesSnapshotAndDefaultsFalse(t *testing.T) {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["terminal_enabled"] != enabled || strings.Contains(string(body), agent.cfg.TerminalToken) {
+		if payload["terminal_enabled"] != enabled || strings.Contains(string(body), agent.cfg.NodeToken) {
 			t.Fatal("report used live config/credential instead of the supplied snapshot")
 		}
 	}
@@ -136,7 +136,7 @@ func TestReportTerminalEnabledUsesSnapshotAndDefaultsFalse(t *testing.T) {
 
 func TestReportWebSocketURLWithConfigAddsQueryParameters(t *testing.T) {
 	got, err := reportWebSocketURLWithConfig(
-		"https://example.com/update?token=1",
+		"https://example.com/update",
 		configSchemaVersion,
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	)
@@ -151,8 +151,8 @@ func TestReportWebSocketURLWithConfigAddsQueryParameters(t *testing.T) {
 		t.Fatalf("scheme = %q, want wss", u.Scheme)
 	}
 	values := u.Query()
-	if values.Get("token") != "1" {
-		t.Fatalf("token query = %q, want 1", values.Get("token"))
+	if values.Get("token") != "" {
+		t.Fatal("credential in URL")
 	}
 	if values.Get("config_schema") != configSchemaVersion {
 		t.Fatalf("config_schema = %q, want %q", values.Get("config_schema"), configSchemaVersion)
@@ -213,11 +213,11 @@ func TestHTTPCollectIntervalZeroDoesNotEnableSamples(t *testing.T) {
 	}
 }
 
-func TestBuildReportBodyKeepsLegacyPOSTShape(t *testing.T) {
+func TestBuildReportBodyKeepsAuthenticatedPOSTShape(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/update",
 			ReportInterval: 60,
 			ResetDay:       1,
@@ -234,7 +234,7 @@ func TestBuildReportBodyKeepsLegacyPOSTShape(t *testing.T) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("payload is not JSON: %v", err)
 	}
-	for _, key := range []string{"id", "secret", "metrics", "collect_interval", "report_interval"} {
+	for _, key := range []string{"id", "metrics", "collect_interval", "report_interval"} {
 		if _, ok := payload[key]; !ok {
 			t.Fatalf("payload missing legacy key %q: %s", key, body)
 		}
@@ -307,7 +307,7 @@ func TestBuildReportBodyIncludesBufferedSamplesWhenCollectIntervalZero(t *testin
 	agent := Agent{
 		cfg: Config{
 			ServerID:        "sid",
-			Secret:          "secret",
+			NodeToken:       strings.Repeat("a", 64),
 			WorkerURL:       "https://worker.example.com/update",
 			ReportInterval:  30,
 			CollectInterval: 0,
@@ -347,10 +347,17 @@ func TestBuildReportBodyIncludesBufferedSamplesWhenCollectIntervalZero(t *testin
 	}
 }
 
-func TestDialReportWebSocketUsesGETUpgradeAndSendsLegacyJSON(t *testing.T) {
+func TestDialReportWebSocketUsesGETUpgradeAndSendsCredentialFreeJSON(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
 	serverErr := make(chan error, 1)
 	received := make(chan []byte, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+testNodeToken || r.Header.Get("X-CFSM-Server-Id") != "sid" || r.URL.Query().Has("token") {
+			serverErr <- fmt.Errorf("WSS node bearer authentication missing")
+			return
+		}
 		if r.Method != http.MethodGet {
 			serverErr <- fmt.Errorf("method = %s, want GET", r.Method)
 			return
@@ -398,23 +405,17 @@ func TestDialReportWebSocketUsesGETUpgradeAndSendsLegacyJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, _, _, err := dialReportWebSocket(
-		t.Context(),
-		wsURL,
-		http.Header{"X-Agent-Version": []string{"test"}},
-		false,
-		2*time.Second,
-	)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/update"
+	transport := &reportTransport{agent: &Agent{cfg: Config{ServerID: "sid", NodeToken: testNodeToken}, log: newLogger(false)}, wsURL: wsURL}
+	conn, _, _, _, err := transport.dial(t.Context())
 	if err != nil {
 		t.Fatalf("dialReportWebSocket returned error: %v", err)
 	}
 	defer conn.Close()
-	transport := &reportTransport{agent: &Agent{log: newLogger(false)}, wsURL: wsURL}
 	if _, err := transport.waitHello(conn); err != nil {
 		t.Fatalf("waitHello returned error: %v", err)
 	}
-	body := []byte(`{"id":"sid","secret":"secret","metrics":{"cpu":"1.00"}}`)
+	body := []byte(`{"id":"sid","metrics":{"cpu":"1.00"}}`)
 	if err := conn.WriteText(body, time.Second); err != nil {
 		t.Fatalf("WriteText returned error: %v", err)
 	}
@@ -447,8 +448,11 @@ func TestReportTransportProtocolDelayPausesPostFallback(t *testing.T) {
 }
 
 func TestPostFallbackFailureIsRateLimitedByReportInterval(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
 	}))
@@ -457,8 +461,8 @@ func TestPostFallbackFailureIsRateLimitedByReportInterval(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
-			WorkerURL:      server.URL,
+			NodeToken:      strings.Repeat("a", 64),
+			WorkerURL:      server.URL + "/update",
 			ReportInterval: 60,
 		},
 		log: newLogger(false),
@@ -895,7 +899,7 @@ func TestReportTransportWSSConfigAppliesRemoteConfig(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/update",
 			ReportInterval: 60,
 			ResetDay:       1,
@@ -947,7 +951,7 @@ func TestReportTransportWSSConfigCanSwitchToHTTP(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/update",
 			ReportInterval: 60,
 			ResetDay:       1,
@@ -985,7 +989,7 @@ func TestReportTransportWSSConfigAllowsMissingMD5(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/update",
 			ReportInterval: 60,
 			ResetDay:       1,
@@ -1013,7 +1017,7 @@ func TestReportTransportWSSConfigThrottlesToOneMinute(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/update",
 			ReportInterval: 60,
 			ResetDay:       1,

@@ -12,7 +12,7 @@ import (
 
 func TestTerminalDisableRemoteConfigCannotRestoreStaleLocalTrue(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config")
-	cfg := Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update", ConfigMD5: "none"}
+	cfg := Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update", ConfigMD5: "none"}
 	a := &Agent{cfg: cfg, paths: Paths{ConfigFile: file}, log: newLogger(false)}
 	if err := writeConfig(file, cfg); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestTerminalDisableProtocol(t *testing.T) {
 func TestTerminalDisablePersistsBeforeACKAndRejectsStaleConfig(t *testing.T) {
 	for _, mode := range []string{"online", "persist_fail", "fresh_install", "disk_install", "old_generation", "old_version"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg := Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update"}
+			cfg := Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update"}
 			file := filepath.Join(t.TempDir(), "config")
 			if err := writeConfig(file, cfg); err != nil {
 				t.Fatal(err)
@@ -86,7 +86,7 @@ func TestTerminalDisablePersistsBeforeACKAndRejectsStaleConfig(t *testing.T) {
 			}
 			if mode == "fresh_install" {
 				next := cfg
-				next.TerminalToken = strings.Repeat("c", 64)
+				next.NodeToken = strings.Repeat("c", 64)
 				if err := writeConfig(file, next); err != nil {
 					t.Fatal(err)
 				}
@@ -94,7 +94,7 @@ func TestTerminalDisablePersistsBeforeACKAndRejectsStaleConfig(t *testing.T) {
 			}
 			if mode == "disk_install" {
 				next := cfg
-				next.TerminalToken = strings.Repeat("c", 64)
+				next.NodeToken = strings.Repeat("c", 64)
 				if err := writeConfig(file, next); err != nil {
 					t.Fatal(err)
 				}
@@ -120,7 +120,7 @@ func TestTerminalDisablePersistsBeforeACKAndRejectsStaleConfig(t *testing.T) {
 				if err != nil || persisted.TerminalEnabled || a.configSnapshot().TerminalEnabled {
 					t.Fatalf("ACK before durablefalse: %v", err)
 				}
-				if persisted.TerminalToken != cfg.TerminalToken {
+				if persisted.NodeToken != cfg.NodeToken {
 					t.Fatal("disable replaced token")
 				}
 			} else {
@@ -135,7 +135,7 @@ func TestTerminalDisablePersistsBeforeACKAndRejectsStaleConfig(t *testing.T) {
 				if err != nil || !persisted.TerminalEnabled {
 					t.Fatal("invalid disable changed durable config")
 				}
-				if mode == "disk_install" && persisted.TerminalToken != strings.Repeat("c", 64) {
+				if mode == "disk_install" && persisted.NodeToken != strings.Repeat("c", 64) {
 					t.Fatal("old control overwrote fresh on-disk installation")
 				}
 			}

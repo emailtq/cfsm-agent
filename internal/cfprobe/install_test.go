@@ -21,14 +21,14 @@ func TestTerminalSummaryDoesNotPrintCredential(t *testing.T) {
 		func() {
 			defer func() { os.Stdout = old }()
 			os.Stdout = output
-			printInstallSummary(Paths{}, InstallOptions{Config: Config{ServerID: "sid", TerminalEnabled: enabled, TerminalToken: token}})
+			printInstallSummary(Paths{}, InstallOptions{Config: Config{ServerID: "sid", TerminalEnabled: enabled, NodeToken: token}})
 		}()
 		if _, err := output.Seek(0, 0); err != nil {
 			t.Fatal(err)
 		}
 		data, err := io.ReadAll(output)
 		output.Close()
-		if err != nil || strings.Contains(string(data), token) || strings.Contains(string(data), "TERMINAL_TOKEN") {
+		if err != nil || strings.Contains(string(data), token) || strings.Contains(string(data), "NODE_TOKEN") {
 			t.Fatal("credential leaked in summary")
 		}
 		want := "disabled"
@@ -42,19 +42,19 @@ func TestTerminalSummaryDoesNotPrintCredential(t *testing.T) {
 }
 
 func TestTerminalReinstallExplicitAndAbsent(t *testing.T) {
-	existing := Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), WorkerURL: "https://worker.example/update"}
+	existing := Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), WorkerURL: "https://worker.example/update"}
 	got := existing
 	mergeExplicitInstallConfig(&got, defaultConfig(), map[string]bool{"auto_update": true})
-	if !got.TerminalEnabled || got.TerminalToken != existing.TerminalToken {
+	if !got.TerminalEnabled || got.NodeToken != existing.NodeToken {
 		t.Fatal("reinstall lost local consent")
 	}
 	mergeExplicitInstallConfig(&got, Config{}, map[string]bool{"terminal": true})
-	if got.TerminalEnabled || got.TerminalToken != existing.TerminalToken {
+	if got.TerminalEnabled || got.NodeToken != existing.NodeToken {
 		t.Fatal("disable must retain credential")
 	}
 	newToken := strings.Repeat("b", 64)
-	mergeExplicitInstallConfig(&got, Config{TerminalToken: newToken}, map[string]bool{"terminal_token_file": true})
-	if got.TerminalEnabled || got.TerminalToken != newToken {
+	mergeExplicitInstallConfig(&got, Config{NodeToken: newToken}, map[string]bool{"token_file": true})
+	if got.TerminalEnabled || got.NodeToken != newToken {
 		t.Fatal("local rotation changed switch or failed")
 	}
 	if err := validateTerminalInstall(defaultConfig(), nil); err != nil {
@@ -120,7 +120,7 @@ func TestPrepareInstallTrafficCorrection(t *testing.T) {
 func TestMergeExplicitInstallConfig(t *testing.T) {
 	existing := Config{
 		ServerID:       "sid",
-		Secret:         "secret",
+		NodeToken:      strings.Repeat("a", 64),
 		WorkerURL:      "https://worker.example.com/report",
 		ReportInterval: 120,
 		ResetDay:       5,

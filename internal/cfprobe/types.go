@@ -25,9 +25,9 @@ const (
 
 type Config struct {
 	ServerID        string
-	Secret          string
+	NodeToken       string
 	WorkerURL       string
-	Name            string // 仅在自动发现阶段使用：未绑定 server id 时作为新建服务器的名称。
+	Name            string // Registration only; never report JSON.
 	CollectInterval int
 	ReportInterval  int
 	CTNode          string
@@ -49,7 +49,6 @@ type Config struct {
 	UpdateProxy string
 	// Terminal consent and credential are local-only, never dynamic configuration.
 	TerminalEnabled bool
-	TerminalToken   string
 	// ConfigMD5 mirrors the worker dynamic config version; local fields like
 	// AutoUpdate and UpdateProxy are intentionally outside that comparison.
 	ConfigMD5 string
@@ -77,6 +76,7 @@ type Paths struct {
 
 type InstallOptions struct {
 	Config
+	RegisterKey    string
 	Debug          bool
 	RXCorrectionGB string
 	TXCorrectionGB string

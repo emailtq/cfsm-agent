@@ -22,6 +22,7 @@ if (-not $cfPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administ
 $Repo = "emailtq/cfsm-agent"
 $GitHubProxy = ""
 $InstallVersion = "latest"
+$InstallNodeToken = ""
 
 $needValueFor = ""
 foreach ($arg in $args) {
@@ -34,6 +35,8 @@ foreach ($arg in $args) {
         continue
     }
     switch -Regex ($arg) {
+        "^--install-node-token=(.*)$" { $InstallNodeToken = $Matches[1]; continue }
+        "^(?:--?secret|--?terminal-token-file|--install-terminal-token)(?:=|$)" { throw "Legacy credentials removed; reinstall with -token." }
         "^--install-ghproxy=(.+)$" { $GitHubProxy = $Matches[1]; continue }
         "^--install-ghproxy$" { $needValueFor = "proxy"; continue }
         "^--install-version=(.+)$" { $InstallVersion = $Matches[1]; continue }
@@ -68,14 +71,82 @@ function Get-ArchName {
     }
 }
 
-function Get-PayloadArguments($Arguments, $TerminalSupported) {
-    foreach ($arg in $Arguments) {
-        if ($arg -eq "-terminal=0" -and -not $TerminalSupported) { continue }
-        if ($arg -eq "-terminal=1" -and -not $TerminalSupported) {
-            throw "This Agent version does not support terminal installation."
+function Test-PrivateNodeTokenParent([string]$Path) {
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $trusted = @($user, 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $parent = [IO.Path]::GetFullPath((Split-Path -Parent $Path))
+    $immediate = $true
+    while ($parent) {
+        $item = Get-Item -LiteralPath $parent -Force
+        if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Unsafe node token parent." }
+        $acl = Get-Acl -LiteralPath $parent
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($owner -notin $trusted) { throw "Untrusted node token parent owner." }
+        $mask = [uint32]0x500D0040 # generic write/all, DELETE/WRITE_DAC/WRITE_OWNER, DELETE_CHILD
+        if ($immediate) { $mask = $mask -bor 6 }
+        foreach ($rule in $acl.Access) {
+            if ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+            $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            $rights = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$rule.FileSystemRights), 0)
+            if ($sid -notin $trusted -and ($rights -band $mask)) { throw "Replaceable node token parent." }
         }
+        $next = [IO.Path]::GetDirectoryName($parent)
+        if (-not $next -or $next -eq $parent) { break }
+        $parent = $next
+        $immediate = $false
+    }
+}
+
+function New-PrivateNodeTokenFile([string]$Token) {
+    if ($Token -cnotmatch '^[a-f0-9]{64}$') { throw "Invalid node token." }
+    $dir = Join-Path $env:TEMP ([IO.Path]::GetRandomFileName())
+    try { Test-PrivateNodeTokenParent $dir } catch {
+        $homePath = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        if (-not $homePath) { throw "No safe node token staging directory." }
+        $dir = Join-Path $homePath ('.cfsm-node-token-' + [IO.Path]::GetRandomFileName())
+        Test-PrivateNodeTokenParent $dir
+    }
+    try {
+        $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = New-Object Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @($user.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+            $identity = New-Object Security.Principal.SecurityIdentifier($sid)
+            $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+        }
+        # Create with the private ACL, never a briefly writable inherited directory.
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($dir), $acl)
+        } else {
+            $null = [IO.Directory]::CreateDirectory($dir, $acl)
+        }
+        $actual = Get-Acl -LiteralPath $dir
+        if (-not $actual.AreAccessRulesProtected) { throw "Cannot protect node token ACL." }
+        foreach ($rule in $actual.Access) {
+            $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($sid -notin @($user.Value, 'S-1-5-18', 'S-1-5-32-544')) { throw "Unsafe node token ACL." }
+        }
+        $file = Join-Path $dir 'node-token'
+        Test-PrivateNodeTokenParent $file
+        [IO.File]::WriteAllText($file, $Token, [Text.Encoding]::ASCII)
+        return $file
+    } catch {
+        Remove-Item -LiteralPath $dir -Force
+        throw "Cannot stage a private node token."
+    }
+}
+
+function Get-PayloadArguments($Arguments, $TokenSupported, $NodeTokenFile) {
+    if (-not $TokenSupported) { throw "This Agent release does not support node tokens; choose a token-capable release." }
+    foreach ($arg in $Arguments) {
+        if ($arg -match '^--install-node-token=') { continue }
+        if ($arg -eq "-terminal=1") { throw "Terminal is supported only on Linux." }
+        if ($NodeTokenFile -and $arg -match '^--?(?:token|token-file|register-key)=') { throw "Node credential options conflict." }
         $arg
     }
+    if ($NodeTokenFile) { "-token-file=$NodeTokenFile" }
 }
 
 $command = if ($args.Count -gt 0) { $args[0] } else { "install" }
@@ -101,11 +172,14 @@ Write-Host "  target  : windows/$arch"
 Write-Host "  asset   : $asset"
 Write-Host "  url     : $url"
 
+$nodeTokenFile = $null
 try {
     Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-    if ($payloadArgs -contains "-terminal=0" -or $payloadArgs -contains "-terminal=1") {
-        $terminalSupported = [bool]((& $tmp help 2>$null) | Select-String -SimpleMatch "-terminal-token-file=")
-        $payloadArgs = @(Get-PayloadArguments $payloadArgs $terminalSupported)
+    if ($command -notin @("uninstall", "remove", "delete", "purge")) {
+        $help = @(& $tmp help 2>$null)
+        $tokenSupported = [bool]($help | Select-String -SimpleMatch "-token-file=") -and [bool]($help | Select-String -SimpleMatch "-register-key=")
+        if ($InstallNodeToken) { $nodeTokenFile = New-PrivateNodeTokenFile $InstallNodeToken }
+        $payloadArgs = @(Get-PayloadArguments $payloadArgs $tokenSupported $nodeTokenFile)
     }
     if ($args.Count -eq 0) {
         & $tmp install
@@ -114,5 +188,9 @@ try {
     }
     exit $LASTEXITCODE
 } finally {
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    if ($nodeTokenFile) {
+        Remove-Item -LiteralPath $nodeTokenFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Split-Path -Parent $nodeTokenFile) -Force -ErrorAction SilentlyContinue
+    }
 }

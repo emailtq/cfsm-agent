@@ -54,17 +54,14 @@ type wsFrame struct {
 }
 
 func (e *wsHandshakeError) Error() string {
-	if e.Body == "" {
-		return fmt.Sprintf("WSS handshake http=%d", e.StatusCode)
-	}
-	return fmt.Sprintf("WSS handshake http=%d body=%s", e.StatusCode, strings.TrimSpace(e.Body))
+	return fmt.Sprintf("WSS handshake http=%d", e.StatusCode)
 }
 
 func (e *wsCloseError) Error() string {
 	if e.Reason == "" {
 		return fmt.Sprintf("WSS close code=%d", e.Code)
 	}
-	return fmt.Sprintf("WSS close code=%d reason=%s", e.Code, e.Reason)
+	return fmt.Sprintf("WSS close code=%d", e.Code)
 }
 
 func dialReportWebSocket(ctx context.Context, rawURL string, headers http.Header, usePublicDNS bool, timeout time.Duration) (*webSocketConn, http.Header, time.Time, time.Time, error) {
@@ -79,7 +76,7 @@ func dialReportWebSocket(ctx context.Context, rawURL string, headers http.Header
 		timeout = wssHandshakeTimeout
 	}
 	scheme := strings.ToLower(u.Scheme)
-	if scheme != "ws" && scheme != "wss" {
+	if scheme != "wss" || u.User != nil || u.Fragment != "" {
 		return nil, nil, time.Time{}, time.Time{}, fmt.Errorf("unsupported WSS scheme %q", u.Scheme)
 	}
 

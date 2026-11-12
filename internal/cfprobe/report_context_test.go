@@ -10,8 +10,11 @@ import (
 )
 
 func TestStoppedAgentDoesNotSendPOSTRequests(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
 	requests := make(chan struct{}, 2)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests <- struct{}{}
 		_, _ = w.Write([]byte("OK"))
 	}))
@@ -19,7 +22,7 @@ func TestStoppedAgentDoesNotSendPOSTRequests(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	a := &Agent{ctx: ctx, log: newLogger(false)}
-	cfg := Config{WorkerURL: server.URL}
+	cfg := Config{WorkerURL: server.URL + "/update", NodeToken: testNodeToken}
 	if _, err := a.postReportBody(cfg, []byte(`{}`), 0, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("report error=%v, want canceled", err)
 	}

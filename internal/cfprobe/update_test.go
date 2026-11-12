@@ -231,7 +231,7 @@ func TestRemoteConfigMD5UsesHeaderAndPreservesUpdateProxy(t *testing.T) {
 	a := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/report",
 			ReportInterval: defaultReportIntervalSec,
 			ResetDay:       1,

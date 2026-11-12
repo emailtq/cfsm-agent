@@ -4,22 +4,26 @@
 
 ## 快速安装
 
+HTTP POST、WSS GET Upgrade 和终端均使用 `Authorization: Bearer <NODE_TOKEN>`，凭据不进入 JSON 或 URL。ID 仅用于非秘密标识，提供时必须与 token 所属节点一致。安装命令仍可能通过终端历史、进程参数、剪贴板或截图泄露，请仅在受信环境使用。
+
+旧版本不支持此协议。本次未发布新版；安装器会检查 `-token-file` / `-register-key` 能力，旧 release 安装失败。指定版本示例中的 `TOKEN_CAPABLE_RELEASE` 必须替换为实际支持的新 release。
+
 从面板或后台获取以下 3 个参数：
 
 - `SERVER_ID`：服务器 ID
-- `SECRET`：服务器密钥
+- `NODE_TOKEN`：32 字节随机值编码为 64 位小写十六进制，监控和终端共用
 - `WORKER_URL`：Worker 上报地址，例如 `https://example.com/update`
 
 Linux、OpenWrt、Synology DSM、FreeBSD、macOS 可使用安装脚本自动下载当前系统对应的最新 release：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 如果系统没有 `curl`，可使用 `wget`：
 
 ```bash
-wget -O- https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
+wget -O- https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 ### 普通用户安装（非 root）
@@ -28,29 +32,29 @@ wget -O- https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh
 
 ## 自动发现安装（不传 `-id`）
 
-服务端在「设置 → 站点设置」开启**自动发现**后，安装时可以省略 `-id`，由服务端在首次上报时自动建号。
+服务端开启**自动发现**后，从管理员后台显式获取短期注册 key，安装使用 `-register-key`，不要传节点 token 或 ID。
 
 Linux、OpenWrt、Synology DSM、FreeBSD、macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -secret=SECRET -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -register-key=REGISTRATION_KEY -url=WORKER_URL
 ```
 
 指定服务器名称（不传则使用本机公网 IPv4，没有 IPv4 时使用 IPv6）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -secret=SECRET -url=WORKER_URL -name=hk-1
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -register-key=REGISTRATION_KEY -url=WORKER_URL -name=hk-1
 ```
 
 Windows（管理员 PowerShell）：
 
 ```powershell
 $script = "$env:TEMP\install-cf-probe.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
-PowerShell -ExecutionPolicy Bypass -File $script install -secret=SECRET -url=WORKER_URL -name=hk-1
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+PowerShell -ExecutionPolicy Bypass -File $script install -register-key=REGISTRATION_KEY -url=WORKER_URL -name=hk-1
 ```
 
-不传 `-id` 时，Agent 启动后只走 POST 上报：首次上报由服务端创建服务器并返回 ID，Agent 立即写入配置文件（`SERVER_ID`），随后按服务端下发的 `connection_mode` 决定是否切换到 WSS。建号成功的日志为「自动发现已创建服务器」，约 2 分钟后面板才会显示该服务器。若写入配置失败，ID 仍会在本次运行内生效，Agent 会在后续上报中持续重试写入；若始终写不进去，重启后会重新走建号流程——同名会中止退出，名称变化（例如公网 IP 改变）则会建出一台重复服务器，请及时修复配置目录权限。服务端已存在同名服务器（`reused`）、建号失败（`failed`），或服务端未开启自动发现（空 `id` 上报只收到普通 404）时，Agent 只输出一条提示便直接退出：既不复用同名服务器、也不重试，磁盘上不会留下任何标记文件；服务管理器的重启策略已改为仅在异常退出时重启，因此不会被自动拉起（`systemctl status cf-probe` 显示为已停止）。修复后重新执行 `install` 并传入 `-id` 即可恢复。
+安装器在首次上报前向同一 HTTPS origin 的 `/api/agent/register` 发送 Bearer 注册 key，仅提交可选 `name`（最多 100 个 UTF-16 单位）。返回独立 `{serverId, token}` 后只持久化 `SERVER_ID` 和 `NODE_TOKEN`。注册 key 有效期 15 分钟、每 key 最多 100 个节点，不落盘、不用于报告或终端；不会按同名复用其他节点。登记、TLS、权限失败时不停止旧服务、不覆盖已有配置。有有效本地 NODE_TOKEN 的重装直接复用，不会再次登记。`-token`、`-token-file`、`-register-key` 互斥。
 
 ## Windows 安装
 
@@ -62,8 +66,8 @@ PowerShell -ExecutionPolicy Bypass -File $script install -secret=SECRET -url=WOR
 # Windows 8 / Server 2012 R2 默认只启用 TLS 1.0，GitHub 要求 TLS 1.2+
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $script = "$env:TEMP\install-cf-probe.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
-PowerShell -ExecutionPolicy Bypass -File $script install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+PowerShell -ExecutionPolicy Bypass -File $script install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 Windows 上如果安装时开启 `-auto_update=1`，自动更新会下载并执行 `C:\ProgramData\cf-probe\cf-probe-update.exe`，部分杀毒软件或安全策略可能拦截。被拦截时请将 `C:\Program Files\cf-probe\cf-probe.exe`、`C:\ProgramData\cf-probe\cf-probe-update.exe`、`C:\ProgramData\cf-probe\cf-probe.cmd` 加入白名单；如环境不允许放行，建议保持 `-auto_update=0`，需要升级时手动指定版本安装。
@@ -73,13 +77,13 @@ Windows 上如果安装时开启 `-auto_update=1`，自动更新会下载并执�
 默认安装最新 release。需要指定版本时：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install --install-version=v1.0.10 -id=SERVER_ID -secret=SECRET -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install --install-version=TOKEN_CAPABLE_RELEASE -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 GitHub 下载较慢时，可以配置代理前缀：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install --install-ghproxy=https://gh-proxy.example.com -id=SERVER_ID -secret=SECRET -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install --install-ghproxy=https://gh-proxy.example.com -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 ## 常用安装参数
@@ -88,7 +92,9 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 | --- | --- | --- |
 | `-id=SERVER_ID` | 服务器 ID，首次安装必填；服务端开启自动发现时可省略 | 无 |
 | `-name=NAME` | 自动建号时的服务器名称，未传则使用本机公网 IPv4（无 IPv4 时用 IPv6） | 公网 IP |
-| `-secret=SECRET` | 服务器密钥，首次安装必填 | 无 |
+| `-token=NODE_TOKEN` | 监控和终端共用的 64 位小写 hex 节点 token | 无 |
+| `-register-key=KEY` | 首次登记使用的短期 key，不落盘 | 无 |
+| `--install-node-token=TOKEN` | 安装器私有 staging，转为 -token-file | 无 |
 | `-url=WORKER_URL` | Worker 上报地址，首次安装必填 | 无 |
 | `-interval=N` | 上报间隔，单位秒 | `60` |
 | `-collect_interval=N` | 采样间隔，单位秒；WSS auto 开启时为 `0` 或大于 `WSS_REPORT_INTERVAL` 会按 `WSS_REPORT_INTERVAL` 采样 | `0` |
@@ -103,12 +109,14 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 | `-ua=UA` | 上报请求使用的 User-Agent；仅允许字母、数字、空格与 `. _ - / , : ; ( ) + = @ # * ? ~`，≤100 字符。服务端可通过 `X-Ua`（HTTP）或 WSS ack 的 `ua` 字段覆盖，以面板设置为准 | `cfsm` |
 | `-auto_update=0\|1` | 是否开启自动检查更新 | `0` |
 | `-terminal=0\|1` | 仅本地 Linux 终端知情同意；远程配置不能开启 | `0` |
-| `-terminal-token-file=PATH` | 独立节点 token 的绝对路径 owner-only 普通文件，不传 token 文本 | 空 |
+| `-token-file=PATH` | 同一节点 token 的绝对路径私有普通文件，与 token/register-key 互斥 | 空 |
 | `-rx_correction=N` | 下行流量校正，单位 GB | 空 |
 | `-tx_correction=N` | 上行流量校正，单位 GB | 空 |
 | `-debug=0\|1` | 是否开启调试日志 | `0` |
 
-再次执行 `install` 时，如果本机已有配置文件，程序会以已有配置为基础，只覆盖本次显式传入的参数，未传入的参数保留旧值（例如只传 `-auto_update=1` 就只修改自动更新开关）。首次安装（本机无已有配置）时 `-secret`、`-url` 必填；`-id` 在服务端开启自动发现时可省略，具体见[自动发现安装](#自动发现安装不传--id)。
+再次执行 `install` 以已有配置为基础，只覆盖显式参数，复用已保存的 NODE_TOKEN。旧 SECRET/TERMINAL_TOKEN 配置运行会明确要求重装，绝不回退旧认证；显式新 `-token`/`-token-file` 重装可以保留节点 ID、采集参数和流量数据，但清除两种旧凭据。首次安装需节点 token 或短期注册 key，以及不含凭据的 HTTPS `/update` 地址；不允许 HTTP loopback、URL 凭据或关闭 TLS 证书验证。
+
+旧配置的 owner/ACL/mode 或内容被拒绝时，明确新 `-token`/`-token-file` 加 `-url` 可安全重装：不读取、不复用那份不可信配置，未明确传入的采集参数恢复默认，节点 ID 应重新显式传入；已有 traffic 数据保留。目标父目录或必要祖先可被其他用户替换/写入时仍拒绝，需先由管理员选择或修复私有目录；仅给文件设置 0600/DACL 不能绕过父目录保护。
 
 自动更新默认关闭。安装时传入 `-auto_update=1` 后，Agent 启动时会检查 GitHub release，之后每 6 小时检查一次；稳定版按版本号更新，`Snapshot-` 版本会跟随最新可用 Snapshot prerelease。自动更新只由本地 `AUTO_UPDATE` 配置控制，不依赖面板返回 `update=1`。如果安装时配置了 `--install-ghproxy`，代理会写入本地配置并用于后续自动更新；该本地字段不参与远端配置 MD5 对比。自动更新的检查结果、调度结果和失败原因始终以 info 级日志输出，无需开启 debug；系统级 nohup 环境下安装过程的输出会追加到 `/var/log/cf-probe.log`，systemd 环境可通过 `journalctl -u 'cf-probe-auto-update-*'` 查看。
 
@@ -120,17 +128,17 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 
 ## 可选 Linux 终端
 
-终端默认关闭，不是 SSH，也不复用 reporting `SECRET`。需要支持终端的 Worker、内置同源管理员后台、显式站点/节点授权及本地 `-terminal=1` 同时生效。先发布默认关闭的后端，再更新知情同意的测试 Agent，最后显式授权/启用。首次没有节点 token 时保持本地关闭；从后台安全获取一次性 token 后再配置。远程配置、指标 payload 和配置 MD5 不携带或覆盖这两个本地参数。
+终端默认关闭，不是 SSH。监控与终端共用 NODE_TOKEN，但本地 `-terminal=1`、站点/节点授权、管理员浏览器票据仍独立必需。关闭终端不影响监控、不旋转 token；重置节点 token 影响两个通道。远端配置和配置 MD5 不携带或覆盖 token、本地 consent。
 
 安全准备 token 文件：绝对路径、所属用户独占可读写（例如 mode `600`）、普通文件，拒绝 symlink/FIFO 和非 owner 文件。内容须恰好为后台签发的 64 个 lowercase hex 字符（即恰好 64 字节），不允许末尾换行或其他空白。不要把 token 放进 shell 命令/history、环境变量、截图、日志或仓库；配置文件也应仅所属用户可读，Shell 能读取同一用户的文件，不是沙箱。
 
 在已有配置的 Agent 上启用（只有路径，不包含 token）：
 
 ```bash
-cf-probe install -terminal=1 -terminal-token-file=/absolute/path/node-token
+cf-probe install -terminal=1 -token-file=/absolute/path/node-token
 ```
 
-既有 `install.sh` 直接转发这些参数，无需新 wrapper；Windows `install.ps1` 仍支持普通监控，显式终端启用会被拒绝。重装省略参数保留已有值；关闭必须显式 `cf-probe install -terminal=0`，不能仅删除原 token 文件来关闭已经保存的 opt-in。
+安装器 `--install-node-token=NODE_TOKEN` 将同一 token 写私有临时文件再传 `-token-file`；Linux 终端开启且使用 `-token` 时也自动 staging。macOS/Windows 支持 `-token-file` 监控，终端仅 Linux。Windows 使用真实私有 DACL（当前用户/Administrators/SYSTEM），在写 token 字节前保护，权限校验失败拒绝安装。重装省略参数保留已有值；关闭必须显式 `cf-probe install -terminal=0`，不能仅删除原 token 文件。
 
 V1 仅通过能力预检的 Linux：可用 HOME、Shell、`/bin/sleep`、proc/pidfd/ptmx、descriptor duplication/poll、可取消 PTY I/O。ENOSYS/EPERM/缺失能力时不宣告支持、不开 Shell，监控继续。其他 OS 和普通 Linux 监控要求不提高；交叉编译成功不是该 OS 的 PTY 验收。Agent root 服务意味着 root Shell，优先非 root，并取得知情同意。
 
@@ -235,7 +243,7 @@ Get-Content "C:\ProgramData\cf-probe\cf-probe.log" -Wait
 Linux、OpenWrt、Synology DSM、FreeBSD、macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- uninstall
 ```
 
 普通用户执行卸载只清理当前用户的 `~/.cf-probe/`、支持 `systemd --user` 的 Linux 用户服务或 macOS LaunchAgent 自启动项；Synology DSM、OpenWrt、Alpine/OpenRC 以及其他系统级安装请使用 root 权限卸载。root 执行卸载清理系统级安装。macOS root 卸载会同时清理 sudo 调用者对应的用户版安装；旧 root/system 版请先执行 `sudo /usr/local/bin/cf-probe uninstall` 清理，再以普通用户安装。
@@ -244,7 +252,7 @@ Windows 请使用管理员权限打开 PowerShell：
 
 ```powershell
 $script = "$env:TEMP\install-cf-probe.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
 PowerShell -ExecutionPolicy Bypass -File $script uninstall
 ```
 
@@ -252,7 +260,7 @@ PowerShell -ExecutionPolicy Bypass -File $script uninstall
 
 ## 上报数据说明
 
-Agent 优先使用 WebSocket 上报，并保留旧版 `POST` fallback。配置中的 `WORKER_URL` 仍填写 HTTP(S) 上报地址，例如 `https://example.com/update`；Agent 会把 `https://` 转为 `wss://`、把 `http://` 转为 `ws://`，路径和查询参数保持不变。WebSocket 握手使用标准 `GET + Upgrade`。
+Agent 优先使用 WebSocket 上报，并保留 `POST` fallback。`WORKER_URL` 必须填写无凭据、无 query/fragment 的 HTTPS `/update` 地址，例如 `https://example.com/update`。Agent 转为 `wss://`，握手使用标准 `GET + Upgrade`。POST 与 WSS 握手均在 Authorization Header 携带同一 NODE_TOKEN，不再支持旧 secret JSON、URL 或 HTTP loopback。
 
 WSS 建连成功后，Agent 会等待服务端 hello：
 
@@ -260,7 +268,7 @@ WSS 建连成功后，Agent 会等待服务端 hello：
 { "type": "hello", "ts": 1720000000000, "protocol": "update" }
 ```
 
-第一条有效 WSS 上报发送的就是旧 POST body，不改变 payload 结构；后续同一连接内也继续发送相同结构。旧版接收端仍可按 `REPORT_INTERVAL` 接收 `POST` fallback，`Content-Type` 为 `application/json`。为了兼容旧版接收端，`metrics` 内大多数基础指标仍以字符串上报；新增的 `disk` 磁盘 IO 对象使用数值类型。
+第一条及后续 WSS 上报与新 POST body 使用相同结构，不含 secret/token 字段。POST fallback 的 `Content-Type` 为 `application/json`，旧 shared-secret 接收端不兼容此协议。指标类型保持原行为：`metrics` 内大多数基础指标仍为字符串，`disk` 磁盘 IO 对象使用数值类型。
 
 WSS 可用且 `CONNECTION_MODE=auto` 时，Agent 使用服务端配置的 `WSS_REPORT_INTERVAL` 发送实时上报，默认 2 秒，可配置为 1-5 秒；当 `COLLECT_INTERVAL=0` 或大于该值时，实际采样间隔同步使用 `WSS_REPORT_INTERVAL`。服务端 ack 可通过 `nextWssReportAfterMs` 动态调整下一次 WSS 上报间隔，前端有实时订阅时使用该配置值；无前端访问时改用 `REPORT_INTERVAL`，但最低为 60 秒。`CONNECTION_MODE=http` 时不启动 WSS，只按 `REPORT_INTERVAL` 走 `POST /update`。服务端 `/update` WSS 使用 Durable Object 标准 WebSocket API 接收 Agent 上报，让高频业务帧按 WebSocket incoming messages 口径计量；代价是 Agent 长连接存在时 DO 会保持非休眠状态并产生 duration（GB-s）。Agent 不根据服务端 D1 写入节流丢弃实时样本，持久化频率由服务端按 `server.report_interval` 控制。WSS 高频发送只刷新 CPU、内存、网卡累计流量和网速这些轻量实时字段；磁盘容量、磁盘 IO、GPU、进程数、连接数、月流量文件统计等完整指标仍按 `REPORT_INTERVAL` 或原有探测周期刷新，并在 WSS 实时包中复用最近一次缓存值。WSS 不可用时才 fallback 到 POST；WSS 写失败会立即尝试一次 POST fallback，后续 POST 失败重试按 `REPORT_INTERVAL` 限流，避免弱网时打爆 Worker。WSS 握手整体受 10 秒 deadline 约束，连接建立后如果超过当前 WSS 上报间隔加 15 秒仍未收到服务端帧，会主动关闭连接并触发兜底流程。普通 WSS 网络错误使用指数退避重连，最小 60 秒、最大 5 分钟；认证或配置类错误（HTTP `401`/`403`/`404`、WebSocket close code `1008`、服务端 `error` 帧）会同时暂停 WSS 和 POST fallback 120 秒，避免持续消耗服务端额度。WSS 时段关闭是例外：服务端会返回 `409` 和 `wss_schedule_inactive`，Agent 临时改用 POST，不写入本地 `CONNECTION_MODE`，并在后续正常 POST 响应提示 `X-Agent-Wss-Mode: active` 时立即恢复 WSS。该能力要求 Agent `v1.0.10+`。相关日志会明确使用 `WSS connected`、`WSS ack`、`WSS error`、`WSS retry delayed`、`POST fallback delayed` 等关键字区分状态。
 
@@ -283,7 +291,7 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 ```json
 {
   "type": "config",
-  "body": "collect_interval=2&report_interval=60&reset_day=1&schema_version=6&interface=&connection_mode=auto&wss_report_interval=2&ping_mode=tcp"
+  "body": "collect_interval=2&report_interval=60&reset_day=1&schema_version=7&interface=&connection_mode=auto&wss_report_interval=2&ping_mode=tcp"
 }
 ```
 
@@ -296,7 +304,7 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
     "collect_interval": 2,
     "report_interval": 60,
     "reset_day": 1,
-    "schema_version": 6,
+    "schema_version": 7,
     "interface": "",
     "connection_mode": "auto",
     "wss_report_interval": 2,
@@ -310,7 +318,6 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 ```json
 {
   "id": "SERVER_ID",
-  "secret": "SECRET",
   "time": {
     "local_ts": 1754300060123,
     "accurate_ts": 1754300060000,
@@ -394,7 +401,6 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | string | 服务器 ID，对应本地 `SERVER_ID` |
-| `secret` | string | 服务器密钥，对应本地 `SECRET` |
 | `time` | object | 本机墙钟与独立时间校准状态；字段见下表 |
 | `metrics` | object | 当前上报周期的完整监控指标 |
 | `samples` | array | 可选，仅 `COLLECT_INTERVAL > 0` 时存在 |
@@ -503,7 +509,6 @@ WSS 握手会携带标准 WebSocket Upgrade 头，并附带以下 Agent 头：
 ```json
 {
   "id": "SERVER_ID",
-  "secret": "SECRET",
   "rx_correction": 0,
   "tx_correction": 0
 }
@@ -525,7 +530,7 @@ docker run -d --name cf-probe \
   --network=host \
   -v cf-probe-data:/data \
   -e SERVER_ID=SERVER_ID \
-  -e SECRET=SECRET \
+  -e NODE_TOKEN=NODE_TOKEN \
   -e WORKER_URL=https://example.com/update \
   ghcr.io/<owner>/cfsm-agent:latest
 ```
@@ -535,7 +540,7 @@ docker run -d --name cf-probe \
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `SERVER_ID` | 服务器 ID，首次启动必填 | 无 |
-| `SECRET` | 服务器密钥，首次启动必填 | 无 |
+| `NODE_TOKEN` | 服务器密钥，首次启动必填 | 无 |
 | `WORKER_URL` | Worker 上报地址，首次启动必填 | 无 |
 | `REPORT_INTERVAL` | 上报间隔，单位秒 | `60` |
 | `COLLECT_INTERVAL` | 采样间隔，单位秒 | `0` |
@@ -580,7 +585,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t cfsm-agent:local --loa
 需要 Go `1.27.3` 或更新版本。
 
 ```bash
-git clone https://github.com/huilang-me/cfsm-agent.git
+git clone https://github.com/emailtq/cfsm-agent.git
 cd cfsm-agent
 go build -trimpath -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty)" -o cf-probe ./cmd/cf-probe
 ```
@@ -588,7 +593,7 @@ go build -trimpath -ldflags "-s -w -X main.version=$(git describe --tags --alway
 构建后可直接安装：
 
 ```bash
-./cf-probe install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
+./cf-probe install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 前台调试运行：

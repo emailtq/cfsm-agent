@@ -130,7 +130,7 @@ func TestTerminalControlTLSHelper(t *testing.T) {
 	x509.SetFallbackRoots(roots)
 	for _, mode := range []string{"disabled", "http_reporting", "inactive_reporting", "binding", "replacement", "control_loss", "capacity_timeout", "protocol_error", "oversize", "data_disconnect", "two_sessions_bounds"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg := Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: f.server.URL + "/update?report_secret=discard", ConnectionMode: connectionModeHTTP}
+			cfg := Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: f.server.URL + "/update?report_secret=discard", ConnectionMode: connectionModeHTTP}
 			if mode == "binding" {
 				cfg.ServerID = ""
 			}
@@ -183,7 +183,9 @@ func TestTerminalControlTLSHelper(t *testing.T) {
 				if len(f.attached) != 0 {
 					t.Fatal("connected before boundID")
 				}
-				a.applyAutoDiscoveryHeaders(discoveryHeaders(agentAutoDiscoveryCreated, "node"))
+				next := a.configSnapshot()
+				next.ServerID = "node"
+				a.setConfig(next)
 			}
 			control := f.next(t)
 			if control.id != "" || control.auth != "Bearer "+strings.Repeat("a", 64) || control.node != "node" || control.ticket != "" || control.query != "" {
@@ -244,7 +246,7 @@ func TestTerminalControlTLSHelper(t *testing.T) {
 			if mode == "replacement" || mode == "control_loss" {
 				if mode == "replacement" {
 					next := a.configSnapshot()
-					next.TerminalToken = strings.Repeat("c", 64)
+					next.NodeToken = strings.Repeat("c", 64)
 					next.ServerID = "node2"
 					a.setConfig(next)
 				} else {
@@ -387,7 +389,7 @@ func TestTerminalControlNonStartDataCannotSpawn(t *testing.T) {
 			}
 			return data, nil
 		}
-		a := &Agent{cfg: Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
+		a := &Agent{cfg: Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { defer close(done); a.runTerminalWorker(ctx, opts) }()
@@ -423,7 +425,7 @@ func TestTerminalControlCoalescedIdentityChangesReplaceGeneration(t *testing.T) 
 		attached <- p
 		return p, nil
 	}
-	a := &Agent{cfg: Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
+	a := &Agent{cfg: Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); a.runTerminalWorker(ctx, opts) }()
@@ -432,7 +434,7 @@ func TestTerminalControlCoalescedIdentityChangesReplaceGeneration(t *testing.T) 
 	_ = sessionFrame(t, first)
 	original := a.configSnapshot()
 	changed := original
-	changed.TerminalToken = strings.Repeat("c", 64)
+	changed.NodeToken = strings.Repeat("c", 64)
 	a.setConfig(changed)
 	a.setConfig(original)
 	select {
@@ -449,7 +451,7 @@ func TestTerminalControlCoalescedIdentityChangesReplaceGeneration(t *testing.T) 
 }
 
 func TestTerminalControlEligibilityAndUnavailable(t *testing.T) {
-	base := Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update"}
+	base := Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update"}
 	for _, kind := range []string{"disabled", "token", "unbound", "http", "unavailable"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := base
@@ -457,7 +459,7 @@ func TestTerminalControlEligibilityAndUnavailable(t *testing.T) {
 			case "disabled":
 				cfg.TerminalEnabled = false
 			case "token":
-				cfg.TerminalToken = ""
+				cfg.NodeToken = ""
 			case "unbound":
 				cfg.ServerID = ""
 			case "http":
@@ -500,7 +502,7 @@ func TestTerminalControlStartAdmissionAndCancellation(t *testing.T) {
 		}
 		return data, nil
 	}
-	a := &Agent{cfg: Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update", ConnectionMode: connectionModeHTTP}, log: newLogger(false)}
+	a := &Agent{cfg: Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid/update", ConnectionMode: connectionModeHTTP}, log: newLogger(false)}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); a.runTerminalWorker(ctx, opts) }()
@@ -570,7 +572,7 @@ func TestTerminalControlSlowDialAndWriterDoNotBlockOtherSession(t *testing.T) {
 				}
 				return nil, errors.New("unexpected")
 			}
-			a := &Agent{cfg: Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
+			a := &Agent{cfg: Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan struct{})
 			go func() { defer close(done); a.runTerminalWorker(ctx, opts) }()
@@ -653,7 +655,7 @@ func TestTerminalControlExactHeartbeatAndReadDeadline(t *testing.T) {
 	opts.preflight = func(context.Context) error { return nil }
 	opts.heartbeat = 20 * time.Millisecond
 	opts.dial = func(context.Context, Config, string, string, bool) (terminalPeer, error) { return peer, nil }
-	a := &Agent{cfg: Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
+	a := &Agent{cfg: Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); a.runTerminalWorker(ctx, opts) }()
@@ -693,7 +695,7 @@ func TestTerminalControlCancelledAdmissionRejectsLateStart(t *testing.T) {
 		close(arrived)
 		return data, nil
 	}
-	a := &Agent{cfg: Config{TerminalEnabled: true, TerminalToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
+	a := &Agent{cfg: Config{TerminalEnabled: true, NodeToken: strings.Repeat("a", 64), ServerID: "node", WorkerURL: "https://example.invalid"}, log: newLogger(false)}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); a.runTerminalWorker(ctx, opts) }()

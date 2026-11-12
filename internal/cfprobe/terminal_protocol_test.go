@@ -87,16 +87,16 @@ func TestTerminalEndpointAndIndependentHeaders(t *testing.T) {
 			t.Fatal("unsafe session path accepted")
 		}
 	}
-	cfg := Config{ServerID: "node1", Secret: "reporting-secret", TerminalToken: strings.Repeat("a", 64)}
+	cfg := Config{ServerID: "node1", NodeToken: strings.Repeat("a", 64)}
 	h, err := terminalWebSocketHeaders(cfg, "")
-	if err != nil || h.Get("Authorization") != "Bearer "+cfg.TerminalToken || h.Get("X-CFSM-Server-Id") != "node1" || strings.Contains(h.Get("Authorization"), cfg.Secret) {
+	if err != nil || h.Get("Authorization") != "Bearer "+cfg.NodeToken || h.Get("X-CFSM-Server-Id") != "node1" {
 		t.Fatal("independent node authentication failed")
 	}
 	h, err = terminalWebSocketHeaders(cfg, strings.Repeat("b", 64))
 	if err != nil || h.Get("X-CFSM-Terminal-Ticket") != strings.Repeat("b", 64) {
 		t.Fatal("header ticket missing")
 	}
-	for _, bad := range []Config{{ServerID: "node1", Secret: cfg.Secret}, {ServerID: "bad\r\n", TerminalToken: cfg.TerminalToken}} {
+	for _, bad := range []Config{{ServerID: "node1"}, {ServerID: "bad\r\n", NodeToken: cfg.NodeToken}} {
 		if _, err := terminalWebSocketHeaders(bad, ""); err == nil {
 			t.Fatal("invalid node identity accepted")
 		}

@@ -54,11 +54,12 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	var autoUpdate, debug, terminal, terminalTokenFile string
+	var autoUpdate, debug, terminal, nodeTokenFile string
 	var ignoredInstallVersion string
 	fs.StringVar(&opts.ServerID, "id", "", "")
 	fs.StringVar(&opts.Name, "name", "", "")
-	fs.StringVar(&opts.Secret, "secret", "", "")
+	fs.StringVar(&opts.NodeToken, "token", "", "")
+	fs.StringVar(&opts.RegisterKey, "register-key", "", "")
 	fs.StringVar(&opts.WorkerURL, "url", "", "")
 	fs.IntVar(&opts.ReportInterval, "interval", defaultReportIntervalSec, "")
 	fs.IntVar(&opts.CollectInterval, "collect_interval", 0, "")
@@ -88,7 +89,7 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs.StringVar(&opts.UpdateProxy, "install-ghproxy", "", "")
 	fs.StringVar(&ignoredInstallVersion, "install-version", "", "")
 	fs.StringVar(&terminal, "terminal", "", "")
-	fs.StringVar(&terminalTokenFile, "terminal-token-file", "", "")
+	fs.StringVar(&nodeTokenFile, "token-file", "", "")
 
 	if err := fs.Parse(args); err != nil {
 		printUsage(os.Stderr)
@@ -98,6 +99,15 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs.Visit(func(f *flag.Flag) {
 		opts.Explicit[canonicalInstallFlag(f.Name)] = true
 	})
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected install arguments")
+	}
+	if opts.Explicit["token"] && opts.Explicit["token_file"] || opts.Explicit["register_key"] && (opts.Explicit["token"] || opts.Explicit["token_file"]) {
+		return opts, fmt.Errorf("-token, -token-file and -register-key are mutually exclusive")
+	}
+	if opts.Explicit["token"] && !validNodeToken(opts.NodeToken) || opts.Explicit["register_key"] && !validNodeToken(opts.RegisterKey) {
+		return opts, fmt.Errorf("credential must be exactly 64 lowercase hexadecimal characters")
+	}
 	var err error
 	if opts.Explicit["terminal"] {
 		if terminal != "0" && terminal != "1" {
@@ -105,8 +115,8 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 		}
 		opts.TerminalEnabled = terminal == "1"
 	}
-	if opts.Explicit["terminal_token_file"] {
-		opts.TerminalToken, err = readTerminalTokenFile(terminalTokenFile)
+	if opts.Explicit["token_file"] {
+		opts.NodeToken, err = readNodeTokenFile(nodeTokenFile)
 		if err != nil {
 			return opts, err
 		}
@@ -179,15 +189,15 @@ func parseUninstallArgs(args []string) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "用法:")
-	fmt.Fprintln(w, "  cf-probe install -id=SERVER_ID -secret=SECRET -url=WORKER_URL [选项]")
-	fmt.Fprintln(w, "  cf-probe install -secret=SECRET -url=WORKER_URL [-name=NAME]   # 不传 -id，由服务端自动建号")
+	fmt.Fprintln(w, "  cf-probe install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL [选项]")
+	fmt.Fprintln(w, "  cf-probe install -register-key=KEY -url=WORKER_URL [-name=NAME]   # 登记后再上报")
 	fmt.Fprintln(w, "  cf-probe run [-debug=0|1]")
 	fmt.Fprintln(w, "  cf-probe uninstall")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "安装选项:")
 	fmt.Fprintln(w, "  -id=SERVER_ID        服务器 ID；服务端开启自动发现时可省略")
 	fmt.Fprintln(w, "  -name=NAME           自动建号时的服务器名称，默认使用公网 IP")
-	fmt.Fprintln(w, "  -secret=SECRET       服务器密钥（首次安装必填）")
+	fmt.Fprintln(w, "  -token=NODE_TOKEN     Unified 64 lowercase hex node token")
 	fmt.Fprintln(w, "  -url=WORKER_URL      上报地址（首次安装必填）")
 	fmt.Fprintln(w, "  -interval=N          上报间隔(秒)，默认60")
 	fmt.Fprintln(w, "  -collect_interval=N  采样间隔(秒)，默认0")
@@ -200,7 +210,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -auto_update=0|1     开启自动检查更新，默认0")
 	fmt.Fprintln(w, "  -install-ghproxy=URL 自动更新下载代理")
 	fmt.Fprintln(w, "  -terminal=0|1       Local Linux terminal consent (default off)")
-	fmt.Fprintln(w, "  -terminal-token-file=PATH  Absolute owner-only local token file")
+	fmt.Fprintln(w, "  -register-key=KEY    Short-lived registration key (never persisted)")
+	fmt.Fprintln(w, "  -token-file=PATH     Absolute private local token file")
 	fmt.Fprintln(w, "  -rx_correction=N     下行流量校正(GB)")
 	fmt.Fprintln(w, "  -tx_correction=N     上行流量校正(GB)")
 	fmt.Fprintln(w, "  -debug=0|1           输出调试日志，默认0")

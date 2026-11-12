@@ -70,7 +70,7 @@ func linuxSessionStart(t *testing.T, c, r uint16) *linuxTerminalProcess {
 func TestTerminalLinuxTwoPTYDirectoryResizeInterruptAndCleanup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("TERMINAL_TOKEN", "must-not-inherit")
+	t.Setenv("NODE_TOKEN", "must-not-inherit")
 	t.Setenv("API_SECRET", "must-not-inherit")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-inherit")
 	t.Setenv("NODE_OPTIONS", "must-not-inherit")
@@ -79,7 +79,7 @@ func TestTerminalLinuxTwoPTYDirectoryResizeInterruptAndCleanup(t *testing.T) {
 	linuxSessionCommand(t, a, "cd /tmp; printf '\\nA_PWD=%s\\n' \"$PWD\"", "\r\nA_PWD=/tmp\r\n")
 	linuxSessionCommand(t, b, "printf '\\nB_PWD=%s\\n' \"$PWD\"", "\r\nB_PWD="+home+"\r\n")
 	env := linuxSessionCommand(t, b, "env; printf '\\n%s\\n' ENV_DONE", "\r\nENV_DONE\r\n")
-	if strings.Contains(env, "must-not-inherit") || strings.Contains(env, "TERMINAL_TOKEN=") || !strings.Contains(env, "TERM=xterm-256color") {
+	if strings.Contains(env, "must-not-inherit") || strings.Contains(env, "NODE_TOKEN=") || !strings.Contains(env, "TERM=xterm-256color") {
 		t.Fatalf("unsafe shell environment: %s", env)
 	}
 	if err := a.Resize(120, 40); err != nil {
@@ -224,12 +224,12 @@ func TestTerminalLinuxTokenFIFOIsRejectedAndOpenerDoesNotBlock(t *testing.T) {
 	if err := unix.Mkfifo(path, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readTerminalTokenFile(path); err == nil {
+	if _, err := readNodeTokenFile(path); err == nil {
 		t.Fatal("real FIFO accepted as token file")
 	}
 	result := make(chan error, 1)
 	go func() {
-		file, err := openTerminalTokenFile(path)
+		file, err := openNodeTokenFile(path)
 		if err == nil {
 			info, statErr := file.Stat()
 			_ = file.Close()

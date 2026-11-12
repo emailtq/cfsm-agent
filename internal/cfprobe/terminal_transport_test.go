@@ -65,9 +65,12 @@ func TestTerminalWriteDeadlineFailureAndDefault(t *testing.T) {
 }
 
 func TestTerminalHandshakeCancellationAfterUpgradeRequest(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
 	arrived := make(chan struct{}, 1)
 	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { arrived <- struct{}{}; <-release }))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { arrived <- struct{}{}; <-release }))
 	defer server.Close()
 	defer close(release)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -111,14 +114,14 @@ func TestTerminalTLSHelper(t *testing.T) {
 		t.Fatal("bad fixture certificate")
 	}
 	x509.SetFallbackRoots(roots)
-	cfg := Config{WorkerURL: os.Getenv("CFSM_TERMINAL_TEST_URL") + "/update?reporting_secret=discarded", ServerID: "node1", TerminalToken: strings.Repeat("a", 64)}
+	cfg := Config{WorkerURL: os.Getenv("CFSM_TERMINAL_TEST_URL") + "/update?reporting_secret=discarded", ServerID: "node1", NodeToken: strings.Repeat("a", 64)}
 	mode := os.Getenv("CFSM_TERMINAL_TEST_MODE")
 	ws, err := dialTerminalWebSocket(t.Context(), cfg, "S_1", strings.Repeat("b", 64), false)
 	if mode == "redirect" {
 		if ws != nil {
 			ws.Close()
 		}
-		if err == nil || strings.Contains(err.Error(), cfg.TerminalToken) || strings.Contains(err.Error(), strings.Repeat("b", 64)) {
+		if err == nil || strings.Contains(err.Error(), cfg.NodeToken) || strings.Contains(err.Error(), strings.Repeat("b", 64)) {
 			t.Fatal("redirect accepted or echoed credential")
 		}
 		return
@@ -464,7 +467,7 @@ func TestTerminalSocketDeadlinesCancellationAndIndependentWriters(t *testing.T) 
 func TestTerminalDialRejectsUntrustedTLSAndCancellation(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("untrusted TLS reached HTTP handler") }))
 	defer server.Close()
-	cfg := Config{WorkerURL: server.URL + "/update", ServerID: "node1", TerminalToken: strings.Repeat("a", 64)}
+	cfg := Config{WorkerURL: server.URL + "/update", ServerID: "node1", NodeToken: strings.Repeat("a", 64)}
 	if ws, err := dialTerminalWebSocket(t.Context(), cfg, "", "", false); err == nil {
 		ws.Close()
 		t.Fatal("TLS verification disabled")

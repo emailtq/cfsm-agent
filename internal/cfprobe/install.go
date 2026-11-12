@@ -21,14 +21,13 @@ func Install(opts InstallOptions, version string) error {
 
 	existing, existingPath, existingErr := readInstallConfig(paths)
 	usingExistingConfig := existingErr == nil
+	if err := prepareInstallCredentials(&opts, existing, existingErr); err != nil {
+		return err
+	}
 	if usingExistingConfig {
-		fmt.Printf("[INFO] 检测到已有配置，沿用 %s（本次只覆盖显式传入的参数）\n", existingPath)
-		flagConfig := opts.Config
-		opts.Config = existing
-		mergeExplicitInstallConfig(&opts.Config, flagConfig, opts.Explicit)
-	} else if opts.Secret == "" || opts.WorkerURL == "" {
-		printUsage(os.Stderr)
-		return errors.New("首次安装必须提供 -secret 和 -url，例如: cf-probe install -id=SERVER_ID -secret=SECRET -url=WORKER_URL")
+		fmt.Printf("[INFO] Reusing existing config %s (explicit options only)\n", existingPath)
+	} else if existingErr != nil && !errors.Is(existingErr, os.ErrNotExist) && !errors.Is(existingErr, errLegacyCredential) {
+		fmt.Println("[WARN] Replacing rejected configuration using explicit options only; old collection settings are discarded, traffic data retained")
 	}
 	if !usingExistingConfig || opts.ConfigMD5 == "" {
 		opts.ConfigMD5 = "none"
@@ -43,6 +42,12 @@ func Install(opts InstallOptions, version string) error {
 	if err != nil {
 		return err
 	}
+	// Stage and verify private config before touching the running installation.
+	stagedConfig, err := stageConfig(paths.ConfigFile, opts.Config)
+	if err != nil {
+		return fmt.Errorf("prepare private configuration: %w", err)
+	}
+	defer os.Remove(stagedConfig)
 	if !paths.UserMode {
 		if cleaned, residuals := cleanupLegacyInstall(paths); len(cleaned) > 0 || len(residuals) > 0 {
 			if len(cleaned) > 0 {
@@ -78,7 +83,7 @@ func Install(opts InstallOptions, version string) error {
 	if err := migrateTraffic(paths); err != nil {
 		return err
 	}
-	if err := writeConfig(paths.ConfigFile, opts.Config); err != nil {
+	if err := os.Rename(stagedConfig, paths.ConfigFile); err != nil {
 		return fmt.Errorf("写入配置失败: %w", err)
 	}
 	if opts.RXCorrectionGB != "" || opts.TXCorrectionGB != "" {
@@ -123,8 +128,8 @@ func mergeExplicitInstallConfig(dst *Config, src Config, explicit map[string]boo
 			dst.ServerID = src.ServerID
 		case "name":
 			dst.Name = src.Name
-		case "secret":
-			dst.Secret = src.Secret
+		case "token", "token_file":
+			dst.NodeToken = src.NodeToken
 		case "url":
 			dst.WorkerURL = src.WorkerURL
 		case "interval":
@@ -163,20 +168,18 @@ func mergeExplicitInstallConfig(dst *Config, src Config, explicit map[string]boo
 			dst.UpdateProxy = src.UpdateProxy
 		case "terminal":
 			dst.TerminalEnabled = src.TerminalEnabled
-		case "terminal_token_file":
-			dst.TerminalToken = src.TerminalToken
 		}
 	}
 }
 
 func validateTerminalInstall(cfg Config, explicit map[string]bool) error {
-	if !cfg.TerminalEnabled || !explicit["terminal"] && !explicit["terminal_token_file"] {
+	if !cfg.TerminalEnabled || !explicit["terminal"] && !explicit["token_file"] {
 		return nil
 	}
 	if runtime.GOOS != "linux" {
 		return errors.New("terminal is supported only on Linux")
 	}
-	if !validTerminalToken(cfg.TerminalToken) {
+	if !validNodeToken(cfg.NodeToken) {
 		return errors.New("terminal requires a valid local node token")
 	}
 	if _, err := terminalWebSocketURL(cfg.WorkerURL, ""); err != nil {
@@ -332,20 +335,14 @@ func printInstallSummary(paths Paths, opts InstallOptions) {
 	if opts.Name != "" {
 		fmt.Printf("  Server Name : %s\n", opts.Name)
 	}
-	fmt.Printf("  Secret      : ********\n")
+	fmt.Printf("  NodeToken      : ********\n")
 	fmt.Printf("  Worker URL  : %s\n", opts.WorkerURL)
 	fmt.Printf("  Debug       : %v\n", opts.Debug)
 	printTerminalConsent(opts.TerminalEnabled)
 	printProbeNodes(opts)
 	printManagementCommands(paths)
 	fmt.Println("===========================================")
-	if opts.ServerID == "" {
-		fmt.Println("")
-		fmt.Println("  本次未传 -id，由服务端在首次上报时自动建号：")
-		fmt.Println("    - 用上方「实时日志」命令查看，出现「自动发现已创建服务器」即建号成功")
-		fmt.Println("    - 建号成功后约 2 分钟，面板才会显示该服务器")
-		fmt.Println("    - 若出现「自动发现中止」或「自动发现失败」，服务会退出，按日志原因处理后重新执行 install")
-	}
+
 }
 
 func initSystem() string {

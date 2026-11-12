@@ -6,12 +6,32 @@
 #   - 容器内彻底禁用二进制自更新:无论环境/旧配置为何,AUTO_UPDATE 恒为 0。
 # 环境变量名与 config.conf 的键名保持一致。
 set -eu
+umask 077
 
 DATA_DIR="${CF_PROBE_DATA_DIR:-/data}"
-CONFIG="${DATA_DIR}/config.conf"
+TARGET_CONFIG="${DATA_DIR}/config.conf"
 BIN="/app/cf-probe"
 
+[ "${SECRET+x}" != x ] && [ "${TERMINAL_TOKEN+x}" != x ] || {
+	printf '%s\n' '[ERROR] Legacy credentials removed; recreate container with NODE_TOKEN.' >&2
+	exit 1
+}
+[ ! -L "$DATA_DIR" ] && [ ! -L "$TARGET_CONFIG" ] || exit 1
+[ ! -e "$TARGET_CONFIG" ] || [ -f "$TARGET_CONFIG" ] || exit 1
 mkdir -p "$DATA_DIR"
+CONFIG="$(mktemp "${DATA_DIR}/.node-config.XXXXXX")"
+trap 'rm -f "$CONFIG"' EXIT INT TERM
+if [ -f "$TARGET_CONFIG" ]; then cp "$TARGET_CONFIG" "$CONFIG"; fi
+chmod 600 "$CONFIG"
+if grep -Eq '^(SECRET|TERMINAL_TOKEN)=' "$CONFIG"; then
+	[ "${NODE_TOKEN+x}" = x ] || {
+		printf '%s\n' '[ERROR] Legacy configuration: reinstall with NODE_TOKEN.' >&2
+		exit 1
+	}
+	# Explicit migration retains collection settings, never obsolete credentials.
+	sed '/^SECRET=/d; /^TERMINAL_TOKEN=/d' "$CONFIG" > "$CONFIG.clean"
+	mv "$CONFIG.clean" "$CONFIG"
+fi
 
 # 记录某键在本次启动是否被显式设置(用于首启必填校验)。
 env_is_set() {
@@ -23,6 +43,8 @@ env_is_set() {
 upsert() {
 	key="$1"
 	value="$2"
+	case "$value" in *'"'*|*'\'*|*'
+'*) printf '%s\n' '[ERROR] Unsafe configuration value.' >&2; exit 1 ;; esac
 	tmp="$(mktemp "${DATA_DIR}/.config.XXXXXX")"
 	if [ -f "$CONFIG" ] && grep -q "^${key}=" "$CONFIG"; then
 		awk -v k="$key" -v v="$value" '
@@ -51,7 +73,7 @@ upsert() {
 }
 
 first_run=0
-if [ ! -f "$CONFIG" ]; then
+if [ ! -f "$TARGET_CONFIG" ]; then
 	first_run=1
 	: > "$CONFIG"
 fi
@@ -67,7 +89,7 @@ if [ "$first_run" -eq 1 ]; then
 fi
 
 # 用环境变量覆盖对应键(仅覆盖本次显式设置的)。
-for key in SERVER_ID SECRET WORKER_URL COLLECT_INTERVAL REPORT_INTERVAL \
+for key in SERVER_ID NODE_TOKEN WORKER_URL COLLECT_INTERVAL REPORT_INTERVAL \
 	CT_NODE CU_NODE CM_NODE BD_NODE NODE_1 NODE_2 NODE_3 NODE_4 \
 	INTERFACE RESET_DAY CONNECTION_MODE PING_MODE UPDATE_PROXY; do
 	if env_is_set "$key"; then
@@ -86,11 +108,12 @@ fi
 
 # 容器内强制关闭自动更新(此键不受服务端下发影响,持久有效)。
 upsert AUTO_UPDATE "0"
+upsert TERMINAL_ENABLED "0"
 
 # 首次启动必填校验。
 if [ "$first_run" -eq 1 ]; then
 	missing=""
-	for key in SERVER_ID SECRET WORKER_URL; do
+	for key in SERVER_ID NODE_TOKEN WORKER_URL; do
 		if ! grep -q "^${key}=\"[^\"]" "$CONFIG"; then
 			missing="${missing} ${key}"
 		fi
@@ -101,12 +124,21 @@ if [ "$first_run" -eq 1 ]; then
 请通过环境变量提供,例如:
   docker run -d --name cf-probe --restart=unless-stopped --network=host \\
     -v cf-probe-data:/data \\
-    -e SERVER_ID=xxxx -e SECRET=yyyy -e WORKER_URL=https://example.com/update \\
+    -e SERVER_ID=xxxx -e NODE_TOKEN=<64-lowercase-hex> -e WORKER_URL=https://example.com/update \\
     <image>
 EOF
 		exit 1
 	fi
 fi
+
+node_token="$(sed -n 's/^NODE_TOKEN="\([^"]*\)"$/\1/p' "$CONFIG")"
+[ "${#node_token}" = 64 ] || { printf '%s\n' '[ERROR] Invalid NODE_TOKEN.' >&2; exit 1; }
+case "$node_token" in *[!a-f0-9]*) printf '%s\n' '[ERROR] Invalid NODE_TOKEN.' >&2; exit 1 ;; esac
+worker_url="$(sed -n 's/^WORKER_URL="\([^"]*\)"$/\1/p' "$CONFIG")"
+case "$worker_url" in *'@'*|*'?'*|*'#'*) exit 1 ;; https://*/update) ;; *) printf '%s\n' '[ERROR] HTTPS /update endpoint required.' >&2; exit 1 ;; esac
+mv "$CONFIG" "$TARGET_CONFIG"
+CONFIG="$TARGET_CONFIG"
+trap - EXIT INT TERM
 
 # 透传调试开关(可选)。
 debug_args=""

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -166,20 +167,26 @@ func TestReportFailureDecayResetsCounter(t *testing.T) {
 }
 
 func TestSendReportReportsNon2xxAsFailure(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
 	tests := map[int]bool{
 		http.StatusOK:                 true,
 		http.StatusNotFound:           false,
 		http.StatusServiceUnavailable: false,
 	}
 	for status, wantOK := range tests {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/update" || r.Header.Get("Authorization") != "Bearer "+testNodeToken || r.Header.Get("X-CFSM-Server-Id") != "sid" {
+				t.Error("HTTP node bearer binding")
+			}
 			w.WriteHeader(status)
 		}))
 		agent := &Agent{
 			cfg: Config{
 				ServerID:        "sid",
-				Secret:          "secret",
-				WorkerURL:       server.URL,
+				NodeToken:       strings.Repeat("a", 64),
+				WorkerURL:       server.URL + "/update",
 				ReportInterval:  60,
 				CollectInterval: 2,
 			},

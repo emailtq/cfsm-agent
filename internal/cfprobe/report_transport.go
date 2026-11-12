@@ -116,22 +116,17 @@ func newReportTransport(a *Agent) *reportTransport {
 }
 
 func reportWebSocketURL(raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
+	u, err := url.Parse(raw)
 	if err != nil {
+		return "", errors.New("invalid reporting WSS endpoint")
+	}
+	if u.Scheme == "wss" {
+		u.Scheme = "https"
+	}
+	if _, err := validateReportEndpoint(u.String()); err != nil {
 		return "", err
 	}
-	if u.Host == "" {
-		return "", fmt.Errorf("missing host in %q", raw)
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		u.Scheme = "wss"
-	case "http":
-		u.Scheme = "ws"
-	case "wss", "ws":
-	default:
-		return "", fmt.Errorf("unsupported scheme %q", u.Scheme)
-	}
+	u.Scheme = "wss"
 	return u.String(), nil
 }
 
@@ -366,9 +361,16 @@ func (r *reportTransport) dial(ctx context.Context) (*webSocketConn, http.Header
 	configMD5 := firstNonEmpty(cfg.ConfigMD5, "none")
 	wsURL, err := reportWebSocketURLWithConfig(r.wsURL, configSchemaVersion, configMD5)
 	if err != nil {
-		wsURL = r.wsURL
+		return nil, nil, time.Time{}, time.Time{}, err
+	}
+	if !validNodeToken(cfg.NodeToken) {
+		return nil, nil, time.Time{}, time.Time{}, errors.New("invalid NODE_TOKEN")
 	}
 	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+cfg.NodeToken)
+	if cfg.ServerID != "" {
+		headers.Set("X-CFSM-Server-Id", cfg.ServerID)
+	}
 	headers.Set("Accept", "*/*")
 	headers.Set("User-Agent", firstNonEmpty(cfg.UA, defaultUserAgent))
 	headers.Set("X-Agent-Config-Schema", configSchemaVersion)
@@ -421,7 +423,7 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 		}
 		var frame wsServerFrame
 		if err := json.Unmarshal(payload, &frame); err != nil {
-			r.agent.log.debugf("WSS message ignored invalid_json=%v", err)
+			r.agent.log.debugf("WSS message ignored: invalid JSON")
 			continue
 		}
 		switch frame.Type {
@@ -455,7 +457,7 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 				r.applyConfigBody(body, headers)
 			}
 		case "error":
-			reason := firstNonEmpty(frame.Error, "server_error")
+			reason := "server_error"
 			if scheduleReason, ok := wssScheduleInactiveFromFrame(frame); ok {
 				r.agent.log.info("WSS unavailable ts=%d reason=%s", frame.TS, scheduleReason)
 				r.agent.disableWSSRuntime(scheduleReason)
@@ -468,7 +470,7 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 		case "hello":
 			r.agent.log.debugf("WSS hello repeated ts=%d", frame.TS)
 		default:
-			r.agent.log.debugf("WSS message ignored type=%q", frame.Type)
+			r.agent.log.debugf("WSS message ignored: unsupported type")
 		}
 	}
 }
@@ -778,7 +780,7 @@ func (r *reportTransport) handleConnectionError(ctx context.Context, err error, 
 	}
 	if errors.As(err, &closeErr) && closeErr.Code == 1008 {
 		r.agent.noteReportFailure(closeErr.Code)
-		reason := fmt.Sprintf("WSS close code=1008 reason=%s", closeErr.Reason)
+		reason := "WSS close code=1008"
 		r.agent.log.info("WSS error %s", reason)
 		r.delayProtocol(reason)
 		*backoff = wssNetworkMinRetry

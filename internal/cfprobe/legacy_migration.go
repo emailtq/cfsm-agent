@@ -1,26 +1,36 @@
 package cfprobe
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 )
 
 func readInstallConfig(paths Paths) (Config, string, error) {
+	return readInstallConfigCandidates(paths, legacyConfigFiles(paths))
+}
+
+func readInstallConfigCandidates(paths Paths, candidates []string) (Config, string, error) {
 	cfg, err := readConfig(paths.ConfigFile)
-	if err == nil {
-		return cfg, paths.ConfigFile, nil
+	if err == nil || errors.Is(err, errLegacyCredential) {
+		return cfg, paths.ConfigFile, err
 	}
-	firstErr := err
-	for _, path := range legacyConfigFiles(paths) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return cfg, paths.ConfigFile, err
+	}
+	for _, path := range candidates {
 		if samePath(path, paths.ConfigFile) {
 			continue
 		}
 		cfg, err := readConfig(path)
-		if err == nil {
-			return cfg, path, nil
+		if err == nil || errors.Is(err, errLegacyCredential) {
+			return cfg, path, err
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return Config{}, path, err
 		}
 	}
-	return cfg, paths.ConfigFile, firstErr
+	return Config{}, paths.ConfigFile, os.ErrNotExist
 }
 
 func migrateTraffic(paths Paths) error {

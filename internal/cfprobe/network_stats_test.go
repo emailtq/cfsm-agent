@@ -13,6 +13,9 @@ import (
 )
 
 func TestNetworkReadFailureReportsSavedOrCachedMonthlyTraffic(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
 	for _, running := range []bool{false, true} {
 		name := "startup"
 		if running {
@@ -20,7 +23,7 @@ func TestNetworkReadFailureReportsSavedOrCachedMonthlyTraffic(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			reports := make(chan map[string]any, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var payload struct {
 					Metrics map[string]any `json:"metrics"`
 				}
@@ -35,7 +38,8 @@ func TestNetworkReadFailureReportsSavedOrCachedMonthlyTraffic(t *testing.T) {
 			defer server.Close()
 			cfg := defaultConfig()
 			cfg.ServerID = "network-failure-test"
-			cfg.WorkerURL = server.URL
+			cfg.NodeToken = testNodeToken
+			cfg.WorkerURL = server.URL + "/update"
 			cfg.ConnectionMode = connectionModeHTTP
 			cfg.Interface = "cfsm_missing_interface_for_test"
 			cfg.ResetDay = 0

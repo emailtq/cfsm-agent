@@ -125,7 +125,7 @@ func parseTerminalControl(text []byte, role string) (terminalControl, error) {
 	case "open":
 		protocol, ok := number("protocol", 1, 1)
 		frame.Protocol, frame.SessionID, frame.Ticket = int(protocol), str("sessionId"), str("ticket")
-		valid = ok && terminalIDRE.MatchString(frame.SessionID) && validTerminalToken(frame.Ticket) && size()
+		valid = ok && terminalIDRE.MatchString(frame.SessionID) && validNodeToken(frame.Ticket) && size()
 	case "close":
 		frame.SessionID, frame.Reason = str("sessionId"), str("reason")
 		valid = terminalIDRE.MatchString(frame.SessionID) && terminalCodeRE.MatchString(frame.Reason)
@@ -162,11 +162,11 @@ func terminalWebSocketURL(reportURL, sessionID string) (string, error) {
 }
 
 func terminalWebSocketHeaders(cfg Config, ticket string) (http.Header, error) {
-	if !terminalIDRE.MatchString(cfg.ServerID) || !validTerminalToken(cfg.TerminalToken) || ticket != "" && !validTerminalToken(ticket) {
+	if !terminalIDRE.MatchString(cfg.ServerID) || !validNodeToken(cfg.NodeToken) || ticket != "" && !validNodeToken(ticket) {
 		return nil, errors.New("invalid terminal node authentication")
 	}
 	headers := make(http.Header)
-	headers.Set("Authorization", "Bearer "+cfg.TerminalToken)
+	headers.Set("Authorization", "Bearer "+cfg.NodeToken)
 	headers.Set("X-CFSM-Server-Id", cfg.ServerID)
 	if ticket != "" {
 		headers.Set("X-CFSM-Terminal-Ticket", ticket)

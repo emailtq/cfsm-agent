@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -200,8 +201,11 @@ func TestHandleReportResponseCalibratesDateHeaderWithoutConfig(t *testing.T) {
 }
 
 func TestReportDateCalibrationAnchorsAtHeaderReceiveTime(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
 	const slowBodyDelay = 200 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(responseDateHeader, "Thu, 13 Aug 2026 00:23:22 GMT")
 		w.WriteHeader(http.StatusOK)
 		if flusher, ok := w.(http.Flusher); ok {
@@ -215,8 +219,8 @@ func TestReportDateCalibrationAnchorsAtHeaderReceiveTime(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:  "sid",
-			Secret:    "secret",
-			WorkerURL: server.URL,
+			NodeToken: strings.Repeat("a", 64),
+			WorkerURL: server.URL + "/update",
 		},
 		log: newLogger(false),
 	}
@@ -238,7 +242,7 @@ func TestDateHeaderCoexistsWithURLConfigResponse(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/report",
 			ReportInterval: 60,
 			ResetDay:       1,

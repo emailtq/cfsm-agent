@@ -9,13 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 )
 
 var ifacePartRE = regexp.MustCompile(`^[A-Za-z0-9_.:\-\*\?\[\]]+$`)
+
+var errLegacyCredential = errors.New("legacy credential configuration: reinstall with -token (no shared-secret fallback)")
 
 func defaultConfig() Config {
 	return Config{
@@ -124,9 +125,12 @@ func parseKVFile(path string) (map[string]string, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return parseKVReader(f)
+}
 
+func parseKVReader(reader io.Reader) (map[string]string, error) {
 	values := map[string]string{}
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -146,13 +150,17 @@ func parseKVFile(path string) (map[string]string, error) {
 
 func readConfig(path string) (Config, error) {
 	cfg := defaultConfig()
-	values, err := parseKVFile(path)
+	f, err := openPrivateFile(path)
+	if err != nil {
+		return cfg, fmt.Errorf("private config rejected: %w; reinstall with -token if needed", err)
+	}
+	defer f.Close()
+	values, err := parseKVReader(f)
 	if err != nil {
 		return cfg, err
 	}
 
 	cfg.ServerID = values["SERVER_ID"]
-	cfg.Secret = values["SECRET"]
 	cfg.WorkerURL = values["WORKER_URL"]
 	cfg.Name = values["NAME"]
 	cfg.CollectInterval = parseIntDefault(values["COLLECT_INTERVAL"], cfg.CollectInterval)
@@ -173,26 +181,51 @@ func readConfig(path string) (Config, error) {
 	cfg.AutoUpdate = values["AUTO_UPDATE"] == "1"
 	cfg.UpdateProxy = strings.TrimSpace(values["UPDATE_PROXY"])
 	cfg.TerminalEnabled = values["TERMINAL_ENABLED"] == "1"
-	cfg.TerminalToken = values["TERMINAL_TOKEN"]
+	cfg.NodeToken = values["NODE_TOKEN"]
 	cfg.ConfigMD5 = values["CONFIG_MD5"]
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
 	}
 	normalizeConfigIntervals(&cfg)
+	if _, legacy := values["SECRET"]; legacy {
+		return cfg, errLegacyCredential
+	}
+	if _, legacy := values["TERMINAL_TOKEN"]; legacy {
+		return cfg, errLegacyCredential
+	}
+	if cfg.NodeToken != "" && !validNodeToken(cfg.NodeToken) {
+		return cfg, errors.New("invalid NODE_TOKEN: reinstall with -token")
+	}
 	return cfg, nil
 }
 
 func writeConfig(path string, cfg Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	tmp, err := stageConfig(path, cfg)
+	if err != nil {
 		return err
+	}
+	defer os.Remove(tmp)
+	return os.Rename(tmp, path)
+}
+
+func stageConfig(path string, cfg Config) (string, error) {
+	if err := ensurePrivateConfigDirectory(filepath.Dir(path)); err != nil {
+		return "", err
+	}
+	if err := verifyPrivateParent(path); err != nil {
+		return "", err
 	}
 	normalizeConfigIntervals(&cfg)
 	var buf bytes.Buffer
+	var valueErr error
 	writeKV := func(k, v string) {
+		if strings.ContainsAny(v, "\r\n\x00") {
+			valueErr = errors.New("configuration values must not contain control lines")
+			return
+		}
 		fmt.Fprintf(&buf, "%s=\"%s\"\n", k, strings.ReplaceAll(v, `"`, `\"`))
 	}
 	writeKV("SERVER_ID", cfg.ServerID)
-	writeKV("SECRET", cfg.Secret)
 	writeKV("WORKER_URL", cfg.WorkerURL)
 	writeKV("NAME", cfg.Name)
 	writeKV("COLLECT_INTERVAL", strconv.Itoa(cfg.CollectInterval))
@@ -217,73 +250,130 @@ func writeConfig(path string, cfg Config) error {
 	}
 	writeKV("UPDATE_PROXY", cfg.UpdateProxy)
 	writeKV("TERMINAL_ENABLED", boolInt(cfg.TerminalEnabled))
-	writeKV("TERMINAL_TOKEN", cfg.TerminalToken)
+	writeKV("NODE_TOKEN", cfg.NodeToken)
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
 	}
 	writeKV("CONFIG_MD5", cfg.ConfigMD5)
+	if valueErr != nil {
+		return "", valueErr
+	}
 
 	// A fresh 0600 file avoids following or reusing a predictable stale temp file.
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	f, err := createPrivateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp)
+	keep := false
+	defer func() {
+		if !keep {
+			os.Remove(tmp)
+		}
+	}()
+	if err := protectPrivateFile(f); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err := verifyPrivateParent(path); err != nil {
+		f.Close()
+		return "", err
+	}
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		_ = f.Close()
-		return err
+		return "", err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return "", err
+	}
+	if err := verifyPrivateParent(path); err != nil {
+		f.Close()
+		return "", err
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return "", err
 	}
-	return os.Rename(tmp, path)
+	keep = true
+	return tmp, nil
 }
 
-func validTerminalToken(token string) bool {
+func validNodeToken(token string) bool {
 	return len(token) == 64 && !strings.ContainsFunc(token, func(r rune) bool {
 		return !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f')
 	})
 }
 
-func validateTerminalTokenInfo(info os.FileInfo) error {
+func validateNodeTokenInfo(info os.FileInfo) error {
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
-		return errors.New("terminal token file must be regular and owner-only")
+		return errors.New("node token file must be regular and owner-only")
 	}
 	return nil
 }
 
-func readTerminalTokenFile(path string) (string, error) {
+func readNodeTokenFile(path string) (string, error) {
 	if !filepath.IsAbs(path) {
-		return "", errors.New("terminal token file requires an absolute local path")
+		return "", errors.New("node token file requires an absolute local path")
 	}
-	if runtime.GOOS != "linux" {
-		return "", errors.New("terminal token installation is supported only on Linux")
+	f, err := openPrivateFile(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil || !validNodeToken(string(data)) {
+		return "", errors.New("node token must be exactly 64 lowercase hexadecimal characters")
+	}
+	return string(data), nil
+}
+
+func openPrivateFile(path string) (*os.File, error) {
+	if err := verifyPrivateParent(path); err != nil {
+		return nil, err
 	}
 	before, err := os.Lstat(path)
 	if err != nil {
-		return "", errors.New("cannot inspect terminal token file")
+		return nil, err
 	}
-	if err := validateTerminalTokenInfo(before); err != nil {
-		return "", err
+	if err := validatePrivateFileInfo(before); err != nil {
+		return nil, err
 	}
-	f, err := openTerminalTokenFile(path)
+	f, err := openNodeTokenFile(path)
 	if err != nil {
-		return "", errors.New("cannot open terminal token file")
+		return nil, errors.New("cannot open private credential file")
 	}
-	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !os.SameFile(before, info) {
-		return "", errors.New("terminal token file changed while opening")
+		f.Close()
+		return nil, errors.New("credential file changed while opening")
 	}
-	if err := validateTerminalTokenInfo(info); err != nil {
-		return "", err
+	if err := validatePrivateFileInfo(info); err != nil {
+		f.Close()
+		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, 65))
-	if err != nil || !validTerminalToken(string(data)) {
-		return "", errors.New("terminal token must be exactly 64 lowercase hexadecimal characters")
+	if err := verifyPrivateFile(f); err != nil {
+		f.Close()
+		return nil, err
 	}
-	return string(data), nil
+	if err := verifyPrivateParent(path); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func validateUnixPrivatePermissions(mode os.FileMode, uid, currentUID uint32, directory bool) error {
+	if uid != currentUID && (!directory || uid != 0) {
+		return errors.New("private credential path has an untrusted owner")
+	}
+	if directory {
+		if mode.Perm()&0022 != 0 && !(uid == 0 && mode&os.ModeSticky != 0) {
+			return errors.New("private credential parent is replaceable by another user")
+		}
+	} else if mode.Perm()&0077 != 0 {
+		return errors.New("credential file must be owner-only")
+	}
+	return nil
 }
 
 func normalizeConfigIntervals(cfg *Config) {

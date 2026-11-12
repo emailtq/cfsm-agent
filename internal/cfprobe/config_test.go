@@ -8,101 +8,101 @@ import (
 	"testing"
 )
 
-type terminalTokenInfo struct {
+type nodeTokenInfo struct {
 	os.FileInfo
 	mode os.FileMode
 }
 
-func (i terminalTokenInfo) Mode() os.FileMode { return i.mode }
+func (i nodeTokenInfo) Mode() os.FileMode { return i.mode }
 
-func TestTerminalTokenValidationAndFilesystem(t *testing.T) {
+func TestNodeTokenValidationAndFilesystem(t *testing.T) {
 	for _, token := range []string{strings.Repeat("a", 64), strings.Repeat("0", 64)} {
-		if !validTerminalToken(token) {
+		if !validNodeToken(token) {
 			t.Fatal("valid token rejected")
 		}
 	}
 	for _, token := range []string{"", strings.Repeat("A", 64), strings.Repeat("a", 63), strings.Repeat("a", 65), strings.Repeat("a", 64) + "\n", strings.Repeat("g", 64)} {
-		if validTerminalToken(token) {
+		if validNodeToken(token) {
 			t.Fatal("invalid token accepted")
 		}
 	}
 	for _, mode := range []os.FileMode{0o600, 0o400} {
-		if err := validateTerminalTokenInfo(terminalTokenInfo{mode: mode}); err != nil {
+		if err := validateNodeTokenInfo(nodeTokenInfo{mode: mode}); err != nil {
 			t.Fatal("owner-only mode rejected")
 		}
 	}
 	for _, mode := range []os.FileMode{0o644, 0o640, 0o606, os.ModeSymlink | 0o600, os.ModeDir | 0o600, os.ModeNamedPipe | 0o600, os.ModeSetuid | 0o600} {
-		if err := validateTerminalTokenInfo(terminalTokenInfo{mode: mode}); err == nil {
+		if err := validateNodeTokenInfo(nodeTokenInfo{mode: mode}); err == nil {
 			t.Fatal("unsafe file metadata accepted")
 		}
 	}
-	if _, err := readTerminalTokenFile("relative"); err == nil {
+	if _, err := readNodeTokenFile("relative"); err == nil {
 		t.Fatal("relative path accepted")
 	}
 	path := filepath.Join(t.TempDir(), "token")
 	token := strings.Repeat("a", 64)
-	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+	if err := writePrivateTestFile(path, []byte(token), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "linux" {
-		if _, err := readTerminalTokenFile(path); err == nil {
-			t.Fatal("non-Linux permission check bypassed")
-		}
-		return
-	}
-	got, err := readTerminalTokenFile(path)
-	if err != nil || got != token {
-		t.Fatal("real Linux token read failed")
-	}
-	if err := os.Symlink(path, path+".link"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readTerminalTokenFile(path + ".link"); err == nil {
-		t.Fatal("symlink accepted")
-	}
-	if _, err := readTerminalTokenFile(filepath.Dir(path)); err == nil {
-		t.Fatal("directory accepted")
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readTerminalTokenFile(path); err == nil {
-		t.Fatal("world-readable file accepted")
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, content := range []string{token + "\n", strings.Repeat("A", 64), strings.Repeat("a", 1024)} {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if runtime.GOOS == "windows" {
+		file, err := os.OpenFile(path, os.O_RDWR, 0600)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readTerminalTokenFile(path); err == nil || strings.Contains(err.Error(), content) {
+		if err := protectPrivateFile(file); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		file.Close()
+	}
+	got, err := readNodeTokenFile(path)
+	if err != nil || got != token {
+		t.Fatal("private token read failed")
+	}
+	if err := os.Symlink(path, path+".link"); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := readNodeTokenFile(path + ".link"); err == nil {
+		t.Fatal("symlink accepted")
+	}
+	if _, err := readNodeTokenFile(filepath.Dir(path)); err == nil {
+		t.Fatal("directory accepted")
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readNodeTokenFile(path); err == nil {
+			t.Fatal("world-readable file accepted")
+		}
+		if err := os.Chmod(path, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, content := range []string{token + "\n", strings.Repeat("A", 64), strings.Repeat("a", 1024)} {
+		if err := writePrivateTestFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readNodeTokenFile(path); err == nil || strings.Contains(err.Error(), content) {
 			t.Fatal("invalid source accepted or leaked")
 		}
 	}
 }
 
-func TestTerminalTokenOpenerRejectsSymlink(t *testing.T) {
+func TestNodeTokenOpenerRejectsSymlink(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(path, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+	if err := writePrivateTestFile(path, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "linux" {
-		if file, err := openTerminalTokenFile(path); err == nil {
-			file.Close()
-			t.Fatal("unsupported platform opened token")
-		}
-		return
-	}
-	file, err := openTerminalTokenFile(path)
+	file, err := openNodeTokenFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	file.Close()
 	if err := os.Symlink(path, path+".link"); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
-	if file, err := openTerminalTokenFile(path + ".link"); err == nil {
+	if file, err := openNodeTokenFile(path + ".link"); err == nil {
 		file.Close()
 		t.Fatal("kernel token opener followed symlink")
 	}
@@ -110,11 +110,11 @@ func TestTerminalTokenOpenerRejectsSymlink(t *testing.T) {
 
 func TestTerminalConfigAtomicWriteIgnoresPreexistingTemp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.conf")
-	if err := os.WriteFile(path+".tmp", []byte("unrelated"), 0o644); err != nil {
+	if err := writePrivateTestFile(path+".tmp", []byte("unrelated"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := defaultConfig()
-	cfg.TerminalToken = strings.Repeat("a", 64)
+	cfg.NodeToken = strings.Repeat("a", 64)
 	if err := writeConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -132,24 +132,24 @@ func TestTerminalConfigAtomicWriteIgnoresPreexistingTemp(t *testing.T) {
 
 func TestTerminalConfigDefaultLegacyAndRoundTrip(t *testing.T) {
 	cfg := defaultConfig()
-	if cfg.TerminalEnabled || cfg.TerminalToken != "" {
+	if cfg.TerminalEnabled || cfg.NodeToken != "" {
 		t.Fatal("terminal must default off")
 	}
 	path := filepath.Join(t.TempDir(), "config.conf")
-	if err := os.WriteFile(path, []byte("SERVER_ID=legacy\n"), 0o600); err != nil {
+	if err := writePrivateTestFile(path, []byte("SERVER_ID=legacy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	legacy, err := readConfig(path)
-	if err != nil || legacy.TerminalEnabled || legacy.TerminalToken != "" {
+	if err != nil || legacy.TerminalEnabled || legacy.NodeToken != "" {
 		t.Fatal("legacy opt-in changed")
 	}
 	cfg.TerminalEnabled = true
-	cfg.TerminalToken = strings.Repeat("a", 64)
+	cfg.NodeToken = strings.Repeat("a", 64)
 	if err := writeConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
 	got, err := readConfig(path)
-	if err != nil || !got.TerminalEnabled || got.TerminalToken != cfg.TerminalToken {
+	if err != nil || !got.TerminalEnabled || got.NodeToken != cfg.NodeToken {
 		t.Fatal("terminal roundtrip failed")
 	}
 	cfg.TerminalEnabled = false
@@ -157,7 +157,7 @@ func TestTerminalConfigDefaultLegacyAndRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = readConfig(path)
-	if err != nil || got.TerminalEnabled || got.TerminalToken != cfg.TerminalToken {
+	if err != nil || got.TerminalEnabled || got.NodeToken != cfg.NodeToken {
 		t.Fatal("disabled credential lost")
 	}
 }
@@ -192,7 +192,7 @@ func TestConfigPersistsUpdateProxy(t *testing.T) {
 	path := t.TempDir() + "/config.conf"
 	cfg := defaultConfig()
 	cfg.ServerID = "sid"
-	cfg.Secret = "secret"
+	cfg.NodeToken = strings.Repeat("a", 64)
 	cfg.WorkerURL = "https://worker.example.com/report"
 	cfg.AutoUpdate = true
 	cfg.UpdateProxy = "https://gh-proxy.example.com"
@@ -222,8 +222,8 @@ func TestConfigPersistsUpdateProxy(t *testing.T) {
 
 func TestReadConfigDefaultsConnectionModeAuto(t *testing.T) {
 	path := t.TempDir() + "/config.conf"
-	data := []byte("SERVER_ID=\"sid\"\nSECRET=\"secret\"\nWORKER_URL=\"https://worker.example.com/update\"\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	data := []byte("SERVER_ID=\"sid\"\nNODE_TOKEN=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nWORKER_URL=\"https://worker.example.com/update\"\n")
+	if err := writePrivateTestFile(path, data, 0o600); err != nil {
 		t.Fatalf("write config fixture: %v", err)
 	}
 	got, err := readConfig(path)
@@ -288,7 +288,7 @@ func TestConfigPersistsUserAgent(t *testing.T) {
 	path := t.TempDir() + "/config.conf"
 	cfg := defaultConfig()
 	cfg.ServerID = "sid"
-	cfg.Secret = "secret"
+	cfg.NodeToken = strings.Repeat("a", 64)
 	cfg.WorkerURL = "https://worker.example.com/update"
 	cfg.UA = "MyAgent/1.0"
 
@@ -310,7 +310,7 @@ func TestApplyRemoteUserAgentUpdatesConfigOnce(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ServerID:       "sid",
-			Secret:         "secret",
+			NodeToken:      strings.Repeat("a", 64),
 			WorkerURL:      "https://worker.example.com/update",
 			ReportInterval: 60,
 			ResetDay:       1,

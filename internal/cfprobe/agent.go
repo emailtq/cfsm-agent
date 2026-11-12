@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -34,14 +33,6 @@ type Agent struct {
 	terminalDone          chan struct{}
 	terminalStopped       bool
 	terminalChanged       chan struct{}
-
-	// 自动建号失败后置位：本次运行不再重试建号，也不再上报（空 id 的上报必然 404）。
-	discoveryFailed atomic.Bool
-	// 建号成功的那一次上报只用来取 id：置位后由 applyReportResult 丢弃该次上报的节奏记录，
-	// 让下一次 tick 立刻带着新 id 再上报一次，服务端才能按正常安装的流程比对 md5 并入库。
-	discoveryJustBound atomic.Bool
-	// 上面那次“带 id 的补报”完成后才启动 WSS，保证补报一定走 POST（md5 比对 + 入库）。
-	discoverySyncPending atomic.Bool
 
 	mu         sync.RWMutex
 	probes     ProbeSnapshot
@@ -66,9 +57,7 @@ type Agent struct {
 	lastConfigStateReportMD5 string
 	// 上一次被拒的配置原因：同一份坏配置服务端会持续重发，只提示一次。
 	lastConfigRejectKey string
-	// 自动发现拿到但没能写入配置文件的 id，后续上报会重试落盘。
-	pendingPersistID string
-	updateMu         sync.Mutex
+	updateMu            sync.Mutex
 	// configWriteMu 串行化配置文件写入：动态配置下发与 UA 下发是两条独立通道，
 	// 并发写会把对方的字段覆盖回旧值。
 	configWriteMu sync.Mutex
@@ -112,21 +101,9 @@ const (
 	agentWSSScheduleInactive = "wss_schedule_inactive"
 	agentWSSScheduleEmpty    = "wss_schedule_empty"
 
-	// 服务端自动建号结果：created | reused | failed[:code]
-	agentAutoDiscoveryHeader      = "X-CFSM-Auto-Discovery"
-	agentAutoDiscoveryServerIDKey = "X-CFSM-Server-Id"
-	agentAutoDiscoveryCreated     = "created"
-	agentAutoDiscoveryReused      = "reused"
-	agentAutoDiscoveryFailed      = "failed"
-	// agentAutoDiscoveryDisabled 是 Agent 本地判定的中止原因：未绑定 id 时收到
-	// 不带自动发现标记的 404，说明服务端没有开启自动发现（或版本过旧），服务端不会返回这个值。
-	agentAutoDiscoveryDisabled = "disabled"
 	// agentUAHeader 是服务端下发自定义 UA 的响应头 / WSS ack 字段名。
 	agentUAHeader = "X-Ua"
 )
-
-// ErrAutoDiscoveryFailed 表示未绑定 server id 且自动建号无法完成（失败或重名），进程应直接退出。
-var ErrAutoDiscoveryFailed = errors.New("自动建号已中止，cf-probe 退出")
 
 // 连续失败后的暂停时长：2m → 3m → 5m → 7m → 10m，之后保持 10m。
 var reportBackoffSteps = [...]time.Duration{
@@ -231,8 +208,11 @@ func Run(configFile string, debug bool, version string) error {
 	if err != nil {
 		return fmt.Errorf("读取配置失败 %s: %w", paths.ConfigFile, err)
 	}
-	if cfg.Secret == "" || cfg.WorkerURL == "" {
-		return errors.New("配置缺失: SECRET/WORKER_URL 不能为空")
+	if !validNodeToken(cfg.NodeToken) {
+		return errors.New("NODE_TOKEN missing or invalid: reinstall with -token")
+	}
+	if _, err := validateReportEndpoint(cfg.WorkerURL); err != nil {
+		return err
 	}
 	normalizeConfigIntervals(&cfg)
 
@@ -273,13 +253,6 @@ func Run(configFile string, debug bool, version string) error {
 	}
 	err = a.loop(ctx)
 	a.stopTerminal()
-	if errors.Is(err, ErrAutoDiscoveryFailed) && serviceSystem(paths) == "procd" {
-		// procd 的 respawn 不区分退出码，先删除运行实例，避免自动发现失败后被重新拉起。
-		payload := fmt.Sprintf(`{"name":%q}`, paths.ServiceName)
-		if stopErr := runCommandQuiet("ubus", "call", "service", "delete", payload); stopErr != nil {
-			a.log.warnf("停止 procd 服务失败: %v", stopErr)
-		}
-	}
 	return err
 }
 
@@ -293,15 +266,9 @@ func (a *Agent) loop(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 			a.tick()
-			if a.discoveryAbandoned() {
-				return ErrAutoDiscoveryFailed
-			}
 			resetTimer(timer, a.tickInterval())
 		case <-a.wake:
 			a.tick()
-			if a.discoveryAbandoned() {
-				return ErrAutoDiscoveryFailed
-			}
 			resetTimer(timer, a.tickInterval())
 		case req := <-a.remoteConfig:
 			err := a.applyRemoteConfigWithOptions(req.body, req.headers, req.allowMissingMD5)
@@ -332,11 +299,6 @@ func (a *Agent) wakeTick() {
 	case a.wake <- struct{}{}:
 	default:
 	}
-}
-
-// discoveryAbandoned 表示未绑定 server id 且自动建号已中止（失败或重名），进程应退出。
-func (a *Agent) discoveryAbandoned() bool {
-	return a != nil && a.discoveryFailed.Load() && a.configSnapshot().ServerID == ""
 }
 
 func (a *Agent) tickInterval() time.Duration {
@@ -405,10 +367,6 @@ func (a *Agent) usesWSS() bool {
 }
 
 func (a *Agent) usesWSSConfig(cfg Config) bool {
-	// 未绑定 server id 时只走 POST：WSS 通道要求有效 id，空 id 会被直接拒绝。
-	if cfg.ServerID == "" {
-		return false
-	}
 	if !persistentUsesWSSConfig(cfg) {
 		return false
 	}
@@ -566,93 +524,8 @@ func (a *Agent) handleWSSRuntimeHeaders(headers http.Header) {
 	}
 }
 
-// applyAutoDiscoveryHeaders 处理服务端自动建号结果：
-//   - created：绑定 id 并立即落盘生效，落盘失败也保留内存值，避免下次上报仍为空 id 而重复建号；
-//   - reused：同名服务器已存在，不复用（避免把本机数据写进别人的服务器），提示后退出；
-//   - failed：建号失败，提示后退出，不重试。
-//
-// 退出由 loop 检测 discoveryAbandoned 后完成。
-func (a *Agent) applyAutoDiscoveryHeaders(headers http.Header) {
-	if a == nil || headers == nil {
-		return
-	}
-	raw := strings.ToLower(strings.TrimSpace(headers.Get(agentAutoDiscoveryHeader)))
-	if raw == "" {
-		return
-	}
-
-	status, code, _ := strings.Cut(raw, ":")
-	switch status {
-	case agentAutoDiscoveryCreated:
-		serverID := strings.TrimSpace(headers.Get(agentAutoDiscoveryServerIDKey))
-		if serverID == "" {
-			return
-		}
-		a.configWriteMu.Lock()
-		defer a.configWriteMu.Unlock()
-		cfg := a.configSnapshot()
-		if cfg.ServerID == serverID {
-			return
-		}
-		nextCfg := cfg
-		nextCfg.ServerID = serverID
-		if err := writeConfig(a.paths.ConfigFile, nextCfg); err != nil {
-			// 只写内存也能继续上报，但重启会丢掉 id，所以后续上报里持续重试写入。
-			a.pendingPersistID = serverID
-			a.log.warnf("自动发现 id 写入配置失败（本次运行仍生效，之后会自动重试）: %v", err)
-		}
-		a.setConfig(nextCfg)
-		a.log.info("自动发现已创建服务器，请两分钟后查看")
-		// 建号成功后等同于一次普通安装：下一次 tick 立即用新 id 再 POST 一次
-		// （服务端据此比对 md5 并入库），那次完成后再按 connection_mode 启动传输层。
-		a.discoveryJustBound.Store(true)
-		// 建号那次 POST 已经占用了一次尝试配额，这里必须清掉，
-		// 否则紧接着的补报会被 postAttemptAllowed 挡到下一个上报周期。
-		a.lastPostAttempt = time.Time{}
-		a.reporter.resetReportInterval()
-		a.wakeTick()
-	case agentAutoDiscoveryReused:
-		// 服务端出于防串号不会回传同名服务器的 id，这里不能引用它。
-		a.abortAutoDiscovery(agentAutoDiscoveryReused, "")
-	case agentAutoDiscoveryFailed:
-		a.abortAutoDiscovery(agentAutoDiscoveryFailed, firstNonEmpty(code, "unknown"))
-	}
-}
-
-// abortAutoDiscovery 只输出提示并置位，随后由 loop 返回错误让进程退出；不写任何文件。
-func (a *Agent) abortAutoDiscovery(kind, detail string) {
-	if a.discoveryFailed.Swap(true) {
-		return
-	}
-	switch kind {
-	case agentAutoDiscoveryReused:
-		a.log.warnf("自动发现中止：服务端已存在同名服务器，请更换 -name 后重试，或获取该服务器 ID 后改用 install -id 安装")
-	case agentAutoDiscoveryDisabled:
-		a.log.warnf("服务端未开启自动发现：请在面板「设置 → 站点设置」中开启自动发现")
-	default:
-		a.log.warnf("自动发现失败：code=%s，不再重试。%s", detail, autoDiscoveryFailureHint(detail))
-	}
-}
-
-// autoDiscoveryFailureHint 把服务端返回的失败码翻译成可执行建议。
-func autoDiscoveryFailureHint(code string) string {
-	switch code {
-	case "no_name":
-		return "服务端拿不到服务器名称，请改用 install -name=NAME 重试，或使用面板生成的 -id 安装"
-	case "db_error":
-		return "服务端建号时数据库出错，请稍后重试；持续失败请查看 Worker 日志，或改用 install -id 安装"
-	default:
-		return "请查看 Worker 日志排查，或改用 install -id 安装"
-	}
-}
-
 func (a *Agent) tick() {
 	now := time.Now()
-	if a.discoveryAbandoned() {
-		// 未绑定 id 且自动建号已中止：上报必然是 404，停止采样与上报。
-		a.samples = nil
-		return
-	}
 	if a.reportPauseRemaining(now) > 0 {
 		// 熔断期间停止采样与序列化，这是 CPU 的主要节省点。
 		// 缓冲里剩下的样本属于熔断前的窗口，直接丢弃：恢复后补发会带旧时间戳，
@@ -754,14 +627,6 @@ func (a *Agent) networkRates(now time.Time, current NetBytes, err error) (NetByt
 // 这意味着服务端拒绝期间该窗口的采样点直接丢弃，不会在下次成功上报时补发；
 // 这是刻意取舍：补发会拖长 payload 且时间戳已经过期，服务端图表宁可有缺口。
 func (a *Agent) applyReportResult(result reportSendResult, now time.Time) {
-	defer a.persistPendingServerID()
-	// 建号那一次上报不算“已完成的上报”：不记录 lastPost/lastReport，
-	// 下一次 tick 立即带新 id 重报一次，让服务端走正常的 md5 比对与入库流程。
-	if a != nil && a.discoveryJustBound.Swap(false) {
-		a.samples = nil
-		a.discoverySyncPending.Store(true)
-		return
-	}
 	if result.ok {
 		if result.viaWSS {
 			a.lastReport = now
@@ -771,26 +636,6 @@ func (a *Agent) applyReportResult(result reportSendResult, now time.Time) {
 		}
 	}
 	a.samples = nil
-	// 带 id 的补报已经完成，这时才按 connection_mode 启动传输层（普通安装启动即如此），
-	// 之后的节奏由 WSS / POST 自行决定。
-	if a != nil && a.discoverySyncPending.Swap(false) && a.usesWSS() {
-		a.syncReportTransport()
-	}
-}
-
-// persistPendingServerID 重试写入自动发现拿到的 id：首次写入失败时 id 只在内存里，
-// 重启后配置仍是空 id，会重新走建号流程（同名会中止、名字变了会建出重复服务器）。
-func (a *Agent) persistPendingServerID() {
-	if a == nil || a.pendingPersistID == "" {
-		return
-	}
-	a.configWriteMu.Lock()
-	defer a.configWriteMu.Unlock()
-	if err := writeConfig(a.paths.ConfigFile, a.configSnapshot()); err != nil {
-		return
-	}
-	a.pendingPersistID = ""
-	a.log.info("自动发现 id 已写入配置 %s，重启后无需重新建号", a.paths.ConfigFile)
 }
 
 func (a *Agent) appendSample(now time.Time, m Metrics) {
@@ -975,20 +820,14 @@ func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, err
 
 func (a *Agent) buildReportBodyForConfig(cfg Config, m Metrics, reportAt time.Time) ([]byte, int, error) {
 	payload := map[string]any{
-		"id":               cfg.ServerID,
-		"secret":           cfg.Secret,
 		"time":             a.clock.snapshot(reportAt),
 		"metrics":          a.metricsForReport(m, reportAt),
 		"collect_interval": cfg.CollectInterval,
 		"report_interval":  cfg.ReportInterval,
 		"terminal_enabled": cfg.TerminalEnabled,
 	}
-	// 仅在自动发现阶段有意义：服务端建号时用它作为服务器名称。
-	// 绑定 id 之后不再发送，避免每次上报都带一个无用的字段。
-	if cfg.ServerID == "" {
-		if name := strings.TrimSpace(cfg.Name); name != "" {
-			payload["name"] = name
-		}
+	if cfg.ServerID != "" {
+		payload["id"] = cfg.ServerID
 	}
 	if a.shouldReportConfigState(firstNonEmpty(cfg.ConfigMD5, "none"), reportAt) {
 		payload["config_schema"] = configSchemaVersion
@@ -1021,6 +860,12 @@ func (a *Agent) logMetricsSummary(m Metrics) {
 }
 
 func (a *Agent) postReportBody(cfg Config, body []byte, sampleCount int, fallback bool) (int, error) {
+	if _, err := validateReportEndpoint(cfg.WorkerURL); err != nil {
+		return 0, err
+	}
+	if !validNodeToken(cfg.NodeToken) {
+		return 0, errors.New("invalid NODE_TOKEN")
+	}
 	label := "report"
 	if fallback {
 		label = "POST fallback"
@@ -1079,19 +924,7 @@ func (a *Agent) handleReportResponse(statusCode int, respBody []byte, headers ht
 }
 
 func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, headers http.Header, started, received time.Time) {
-	a.log.debugf("report response http=%d body=%s", statusCode, strings.TrimSpace(string(respBody)))
-	// 自动建号结果可能出现在任意状态码上（created/reused 通常为 2xx，failed 为 404；
-	// 服务端建号后仍可能因载荷校验失败返回 4xx，此时同样要绑定 id，否则下次上报会再建一台），
-	// 因此必须在状态判断之前处理；也必须在 applyRemoteConfig 之前绑定 id。
-	a.applyAutoDiscoveryHeaders(headers)
-	// 未绑定 id 且收到不带自动发现标记的 404：服务端没开自动发现（或版本过旧）。
-	// 这种情况下每次上报都必然是 404，直接提示后退出，避免静默空转。
-	if statusCode == http.StatusNotFound &&
-		strings.TrimSpace(headers.Get(agentAutoDiscoveryHeader)) == "" &&
-		a.configSnapshot().ServerID == "" {
-		a.abortAutoDiscovery(agentAutoDiscoveryDisabled, "")
-		return
-	}
+	a.log.debugf("report response http=%d bytes=%d", statusCode, len(respBody))
 	if statusCode < 200 || statusCode >= 300 {
 		return
 	}
@@ -1421,7 +1254,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		current := a.configSnapshot()
 		nextCfg.UA = current.UA
 		// A queued remote update must not restore a pre-disable installation snapshot.
-		nextCfg.TerminalEnabled, nextCfg.TerminalToken = current.TerminalEnabled, current.TerminalToken
+		nextCfg.TerminalEnabled, nextCfg.NodeToken = current.TerminalEnabled, current.NodeToken
 		nextCfg.ServerID, nextCfg.WorkerURL = current.ServerID, current.WorkerURL
 		writeErr := writeConfig(a.paths.ConfigFile, nextCfg)
 		if writeErr == nil {
@@ -1511,11 +1344,21 @@ func inIntSet(v int, allowed ...int) bool {
 }
 
 func (a *Agent) setAgentHeaders(req *http.Request, cfg Config) {
+	req.Header.Set("Authorization", "Bearer "+cfg.NodeToken)
+	if cfg.ServerID != "" {
+		req.Header.Set("X-CFSM-Server-Id", cfg.ServerID)
+	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", firstNonEmpty(cfg.UA, defaultUserAgent))
 }
 
 func (a *Agent) sendCorrectionConfirm(cfg Config, rx, tx string) error {
+	if _, err := validateReportEndpoint(cfg.WorkerURL); err != nil {
+		return err
+	}
+	if !validNodeToken(cfg.NodeToken) {
+		return errors.New("invalid NODE_TOKEN")
+	}
 	if _, err := parseTrafficCorrectionGB(rx); err != nil {
 		return err
 	}
@@ -1523,10 +1366,11 @@ func (a *Agent) sendCorrectionConfirm(cfg Config, rx, tx string) error {
 		return err
 	}
 	payload := map[string]any{
-		"id":            cfg.ServerID,
-		"secret":        cfg.Secret,
 		"rx_correction": parseFloatDefault(rx, 0),
 		"tx_correction": parseFloatDefault(tx, 0),
+	}
+	if cfg.ServerID != "" {
+		payload["id"] = cfg.ServerID
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(a.requestContext(), http.MethodPost, cfg.WorkerURL, bytes.NewReader(body))
@@ -1535,7 +1379,7 @@ func (a *Agent) sendCorrectionConfirm(cfg Config, rx, tx string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	a.setAgentHeaders(req, cfg)
-	client := http.Client{Timeout: 4 * time.Second}
+	client := sharedReportHTTPClient(4*time.Second, usePublicDNSResolver(cfg))
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

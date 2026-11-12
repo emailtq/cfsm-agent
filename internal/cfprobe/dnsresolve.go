@@ -60,6 +60,7 @@ func sharedReportHTTPClient(timeout time.Duration, usePublicDNS bool) *http.Clie
 		return client
 	}
 	client := newUpdateHTTPClient(timeout, usePublicDNS)
+	client.CheckRedirect = sameOriginRedirect
 	sharedClients[key] = client
 	return client
 }

@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
+umask 077
 
 REPO="emailtq/cfsm-agent"
 GITHUB_PROXY=""
 INSTALL_VERSION="latest"
-INSTALL_TERMINAL_TOKEN=""
+INSTALL_NODE_TOKEN=""
 
 log() {
     printf '%s\n' "$*"
@@ -30,7 +31,7 @@ for arg in "$@"; do
         --install-ghproxy) need_value_for="proxy" ;;
         --install-version=*) INSTALL_VERSION="${arg#*=}" ;;
         --install-version) need_value_for="version" ;;
-        --install-terminal-token=*) INSTALL_TERMINAL_TOKEN="${arg#*=}" ;;
+        --install-node-token=*) INSTALL_NODE_TOKEN="${arg#*=}" ;;
     esac
 done
 
@@ -67,7 +68,7 @@ check_darwin_version() {
             return 0
             ;;
     esac
-    die "macOS $ver is not supported: this release requires macOS 13 Ventura or later. Please install v1.0.20 or earlier."
+    die "macOS $ver is not supported: this release requires macOS 13 Ventura or later. A token-capable Agent requires macOS 13 or later."
 }
 
 # MIPS uname -m does NOT reveal byte order: modern kernels report "mips" for both
@@ -140,45 +141,50 @@ run_payload() {
             return
             ;;
     esac
-    if [ "$#" -eq 0 ]; then
-        "$bin" install
-        return
-    fi
-    terminal_supported=0
-    if terminal_help=$("$bin" help 2>/dev/null); then
-        :
-    else
+    [ "$#" -ne 0 ] || set -- install
+    token_supported=0
+    if token_help=$("$bin" help 2>/dev/null); then :; else
         probe_status=$?
         [ "$probe_status" -ne 126 ] || return 126
     fi
-    if printf '%s' "$terminal_help" | grep -q -- '-terminal-token-file='; then
-        terminal_supported=1
+    if printf '%s' "$token_help" | grep -q -- '-token-file=' && printf '%s' "$token_help" | grep -q -- '-register-key='; then
+        token_supported=1
     fi
+    [ "$token_supported" = 1 ] || die "this Agent release does not support node tokens; choose a token-capable release"
     terminal_on=0
+    direct_token=""
+    for arg in "$@"; do
+        case "$arg" in
+            -terminal=1|--terminal=1) terminal_on=1 ;;
+            -token=*|--token=*) direct_token="${arg#*=}" ;;
+            -secret*|--secret*|-terminal-token-file*|--terminal-token-file*|--install-terminal-token*) die "legacy credential options removed; reinstall with -token" ;;
+        esac
+    done
+    [ "$terminal_on" = 0 ] || [ "$os_name" = linux ] || die "terminal is supported only on Linux"
+    staged_token="$INSTALL_NODE_TOKEN"
+    if [ -n "$staged_token" ]; then
+        [ -z "$direct_token" ] || die "node token options conflict"
+    elif [ "$terminal_on" = 1 ] && [ -n "$direct_token" ]; then
+        staged_token="$direct_token"
+    fi
     for arg in "$@"; do
         shift
         case "$arg" in
-            --install-terminal-token=*) ;;
-            -terminal=0) [ "$terminal_supported" = 0 ] || set -- "$@" "$arg" ;;
-            -terminal=1)
-                [ "$os_name" = linux ] && [ "$terminal_supported" = 1 ] || die "this Agent/platform does not support terminal installation"
-                terminal_on=1
-                set -- "$@" "$arg"
-                ;;
+            --install-node-token=*) ;;
+            -token=*|--token=*) [ -n "$staged_token" ] || set -- "$@" "$arg" ;;
             *) set -- "$@" "$arg" ;;
         esac
     done
-    if [ -n "$INSTALL_TERMINAL_TOKEN" ]; then
-        [ "$terminal_on" = 1 ] || die "terminal credential requires explicit local opt-in"
-        [ "${#INSTALL_TERMINAL_TOKEN}" = 64 ] || die "invalid terminal credential"
-        case "$INSTALL_TERMINAL_TOKEN" in *[!a-f0-9]*) die "invalid terminal credential" ;; esac
-        terminal_file=$(mktemp "${TMPDIR:-/tmp}/cf-probe-terminal.XXXXXXXXXX") || die "cannot create private terminal credential file"
-        chmod 600 "$terminal_file" || die "cannot protect terminal credential file"
-        printf '%s' "$INSTALL_TERMINAL_TOKEN" > "$terminal_file" || die "cannot write terminal credential"
-        set -- "$@" "-terminal-token-file=$terminal_file"
+    if [ -n "$staged_token" ]; then
+        [ "${#staged_token}" = 64 ] || die "invalid node token"
+        case "$staged_token" in *[!a-f0-9]*) die "invalid node token" ;; esac
+        node_token_file=$(mktemp "${TMPDIR:-/tmp}/cf-probe-node-token.XXXXXXXXXX") || die "cannot create private token file"
+        chmod 600 "$node_token_file" || die "cannot protect token file"
+        printf '%s' "$staged_token" > "$node_token_file" || die "cannot write node token"
+        set -- "$@" "-token-file=$node_token_file"
     fi
     if "$bin" "$@"; then rc=0; else rc=$?; fi
-    if [ -n "${terminal_file:-}" ]; then rm -f "$terminal_file"; terminal_file=""; fi
+    if [ -n "${node_token_file:-}" ]; then rm -f "$node_token_file"; node_token_file=""; fi
     return "$rc"
 }
 
@@ -264,8 +270,8 @@ fi
 tmp_dir="${TMPDIR:-/tmp}"
 tmp="${tmp_dir%/}/cf-probe-bootstrap.$$"
 tmp_err="$tmp.err"
-terminal_file=""
-trap 'rm -f "$tmp" "$tmp_err"; [ -z "$terminal_file" ] || rm -f "$terminal_file"' EXIT INT TERM
+node_token_file=""
+trap 'rm -f "$tmp" "$tmp_err"; [ -z "$node_token_file" ] || rm -f "$node_token_file"' EXIT INT TERM
 
 log "CF-Server-Monitor Go Probe bootstrap"
 log "  repo    : $REPO"
