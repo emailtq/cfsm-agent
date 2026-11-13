@@ -2,6 +2,7 @@ package cfprobe
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,13 +15,85 @@ import (
 func fixtureShell(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		return "D:/Extra_Downloads/APPs/Git/bin/bash.exe"
+		if path, err := exec.LookPath("bash"); err == nil {
+			// Legacy Windows bash.exe launches WSL, which cannot consume Windows fixture paths.
+			root := os.Getenv("SystemRoot")
+			if !samePath(path, filepath.Join(root, "System32", "bash.exe")) && !samePath(path, filepath.Join(root, "Sysnative", "bash.exe")) {
+				return path
+			}
+		}
+		git, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatalf("cannot discover fixture bash or installed Git: %v", err)
+		}
+		root := filepath.Dir(filepath.Dir(git))
+		var lookupErr error
+		for _, dir := range []string{"bin", filepath.Join("usr", "bin")} {
+			if path, err := exec.LookPath(filepath.Join(root, dir, "bash.exe")); err == nil {
+				return path
+			} else {
+				lookupErr = err
+			}
+		}
+		t.Fatalf("cannot discover Git Bash beside installed Git %q: %v", git, lookupErr)
 	}
 	path, err := exec.LookPath("sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestFixtureShellUsesPATH(t *testing.T) {
+	dir := t.TempDir()
+	name := "sh"
+	if runtime.GOOS == "windows" {
+		name = "bash.exe"
+	}
+	want := filepath.Join(dir, name)
+	if err := os.WriteFile(want, []byte("fixture executable discovery only"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	if got := fixtureShell(t); !samePath(got, want) {
+		t.Fatalf("shell discovery ignored PATH: got %q, want %q", got, want)
+	}
+}
+
+func TestFixtureShellUsesInstalledGitFallback(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Git installation layout")
+	}
+	dir := t.TempDir()
+	cmdDir, binDir := filepath.Join(dir, "cmd"), filepath.Join(dir, "bin")
+	for _, path := range []string{cmdDir, binDir} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := filepath.Join(binDir, "bash.exe")
+	for _, path := range []string{filepath.Join(cmdDir, "git.exe"), want} {
+		if err := os.WriteFile(path, []byte("fixture executable discovery only"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", cmdDir)
+	if got := fixtureShell(t); !samePath(got, want) {
+		t.Fatalf("shell discovery ignored Git installation: got %q, want %q", got, want)
+	}
+	winDir := filepath.Join(dir, "Windows")
+	systemDir := filepath.Join(winDir, "System32")
+	if err := os.MkdirAll(systemDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(systemDir, "bash.exe"), []byte("WSL launcher discovery only"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SystemRoot", winDir)
+	t.Setenv("PATH", systemDir+string(os.PathListSeparator)+cmdDir)
+	if got := fixtureShell(t); !samePath(got, want) {
+		t.Fatalf("selected WSL launcher rather than Git Bash: %q", got)
+	}
 }
 
 func TestNodeTokenShellInstallerPrivateStaging(t *testing.T) {
@@ -69,8 +142,12 @@ exit "${PAYLOAD_CODE:-0}"
 			cmd := exec.CommandContext(ctx, fixtureShell(t), "-c", script)
 			cmd.Env = append(os.Environ(), "PAYLOAD="+filepath.ToSlash(payload), "RESULT="+dir, "SUPPORTED="+tc.supported, "TOKEN="+testNodeToken, "TMPDIR="+dir)
 			output, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if err != nil && !errors.As(err, &exitErr) {
+				t.Fatalf("cannot execute installer fixture shell %q: %v\n%s", cmd.Path, err, output)
+			}
 			if (err == nil) != tc.ok {
-				t.Fatalf("installer success=%v want %v: %s", err == nil, tc.ok, output)
+				t.Fatalf("installer success=%v want %v: %v\n%s", err == nil, tc.ok, err, output)
 			}
 			if strings.Contains(string(output), testNodeToken) {
 				t.Fatal("installer logged token")
@@ -132,8 +209,12 @@ func TestNodeTokenDockerEntrypointFailBeforeConfigMutation(t *testing.T) {
 				cmd.Env = append(cmd.Env, "NODE_TOKEN="+tc.token)
 			}
 			output, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if err != nil && !errors.As(err, &exitErr) {
+				t.Fatalf("cannot execute Docker fixture shell %q: %v\n%s", cmd.Path, err, output)
+			}
 			if (err == nil) != tc.ok {
-				t.Fatalf("success=%v want %v: %s", err == nil, tc.ok, output)
+				t.Fatalf("success=%v want %v: %v\n%s", err == nil, tc.ok, err, output)
 			}
 			got, _ := os.ReadFile(config)
 			if !tc.ok {
