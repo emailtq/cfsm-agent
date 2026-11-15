@@ -74,25 +74,26 @@ type wsHelloFrame struct {
 // 不是对本次上报的确认；字段名需与服务端协议保持一致，拼写不符时恒为 false，
 // 等于没有该区分（此时所有 ack 都会清零连续失败计数）。
 type wsServerFrame struct {
-	Type                 string `json:"type"`
-	TS                   int64  `json:"ts"`
-	Persisted            *bool  `json:"persisted"`
-	NextD1WriteAfterMs   *int64 `json:"nextD1WriteAfterMs"`
-	NextWSSReportAfterMs *int64 `json:"nextWssReportAfterMs"`
-	RealtimeHint         bool   `json:"realtimeHint"`
-	Error                string `json:"error"`
-	Code                 int    `json:"code"`
-	Text                 string `json:"text"`
-	ConnectionMode       string `json:"connection_mode"`
-	Body                 string `json:"body"`
-	ConfigBody           string `json:"config_body"`
-	Config               any    `json:"config"`
-	UA                   string `json:"ua"`
-	ConfigMD5            string `json:"config_md5"`
-	ConfigMD5Camel       string `json:"configMd5"`
-	MD5                  string `json:"md5"`
-	Payload              any    `json:"payload"`
-	Headers              any    `json:"headers"`
+	SSHAck               *sshEventAck `json:"ssh_ack"`
+	Type                 string       `json:"type"`
+	TS                   int64        `json:"ts"`
+	Persisted            *bool        `json:"persisted"`
+	NextD1WriteAfterMs   *int64       `json:"nextD1WriteAfterMs"`
+	NextWSSReportAfterMs *int64       `json:"nextWssReportAfterMs"`
+	RealtimeHint         bool         `json:"realtimeHint"`
+	Error                string       `json:"error"`
+	Code                 int          `json:"code"`
+	Text                 string       `json:"text"`
+	ConnectionMode       string       `json:"connection_mode"`
+	Body                 string       `json:"body"`
+	ConfigBody           string       `json:"config_body"`
+	Config               any          `json:"config"`
+	UA                   string       `json:"ua"`
+	ConfigMD5            string       `json:"config_md5"`
+	ConfigMD5Camel       string       `json:"configMd5"`
+	MD5                  string       `json:"md5"`
+	Payload              any          `json:"payload"`
+	Headers              any          `json:"headers"`
 }
 
 type wsScheduleInactivePayload struct {
@@ -428,6 +429,9 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 		}
 		switch frame.Type {
 		case "ack":
+			if !frame.RealtimeHint && frame.SSHAck != nil {
+				r.agent.ackSSHEvents(*frame.SSHAck)
+			}
 			persisted := false
 			if frame.Persisted != nil {
 				persisted = *frame.Persisted
@@ -574,7 +578,7 @@ func wssConfigPayload(payload any) (string, string, map[string]string) {
 			"collect_interval", "report_interval", "wss_report_interval", "reset_day", "schema_version", "interface", "connection_mode", "ping_mode",
 			"custom_ct", "custom_cu", "custom_cm", "custom_bd", "node_1", "node_2", "node_3", "node_4",
 			"rx_correction", "tx_correction", "update",
-			"extra_ping_nodes", "latency_tasks",
+			"extra_ping_nodes", "latency_tasks", "ssh_login_enabled",
 		} {
 			if raw, ok := value[key]; ok {
 				if key == "extra_ping_nodes" || key == "latency_tasks" {

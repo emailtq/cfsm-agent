@@ -10,6 +10,14 @@
 
 支持 schema 9 的 [v1.3.0](https://github.com/emailtq/cfsm-agent/releases/tag/v1.3.0) 已发布。已启用自动更新的节点按既有周期升级，其他节点从后台安装入口指定 v1.3.0；发布不会主动重装节点。迁移、历史身份和删除语义见 Worker 仓库的 `docs/latency-tasks.md`。
 
+## SSH 成功认证事件（schema 10 源码，尚未发布）
+
+本源码新增 Worker 下发的 `ssh_login_enabled=0|1` 和私有 `ssh_events.version=1` 报告。当前已发布 v1.3.0/schema 9 不包含采集器；先部署配套 Worker，再由后续发布提供 schema 10 Agent。普通监控和原配置入口继续可用。
+
+支持 Linux OpenSSH 的固定来源：优先读取已有 journalctl 中的 sshd／sshd-session／sshd-auth 记录，没有可读 journal 时尝试 `/var/log/auth.log` 或 `/var/log/secure`。只识别 `Accepted` 成功认证，不把本系统 PTY、失败尝试或会话关闭当作 SSH 登录。不接受网络下发的任意日志路径、命令，也不提权或修改 SSH／日志配置；权限不足、来源不可用、轮换缺口、队列满及非 Linux 平台会报告对应状态。
+
+首次观察不回放旧日志。游标及最多 1024 个待确认事件保存于实际配置文件旁的私有 `ssh-events.json`，每次至多报告 32 个。HTTP `X-CFSM-Ssh-Ack` 和 WSS `ssh_ack` 确认 Worker 的持久化高水位；普通 2xx 或实时提示不能清队列。原始日志、指纹和凭据不进入报告，事件字段不进入资源指标或样本。详见配套 Worker 的 `docs/login-events.md`。
+
 ## 快速安装
 
 HTTP POST、WSS GET Upgrade 和终端均使用 `Authorization: Bearer <NODE_TOKEN>`，凭据不进入 JSON 或 URL。ID 仅用于非秘密标识，提供时必须与 token 所属节点一致。安装命令仍可能通过终端历史、进程参数、剪贴板或截图泄露，请仅在受信环境使用。

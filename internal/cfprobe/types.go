@@ -7,7 +7,7 @@ const (
 	legacyAgentVersion          = "1.0.0"
 	maxTrafficCorrectionGB      = 1000000
 	autoUpdateDelay             = 60 * time.Second
-	configSchemaVersion         = "9"
+	configSchemaVersion         = "10"
 	defaultReportIntervalSec    = 60
 	defaultWSSReportIntervalSec = 2
 	// 单个上报窗口的硬上限：正常 60s/2s 窗口约 30 条，只有 REPORT_INTERVAL 远大于
@@ -51,6 +51,7 @@ type Config struct {
 	UpdateProxy string
 	// Terminal consent and credential are local-only, never dynamic configuration.
 	TerminalEnabled bool
+	SSHLoginEnabled bool
 	// ConfigMD5 mirrors the worker dynamic config version; local fields like
 	// AutoUpdate and UpdateProxy are intentionally outside that comparison.
 	ConfigMD5 string

@@ -195,6 +195,11 @@ func readConfig(path string) (Config, error) {
 	cfg.AutoUpdate = values["AUTO_UPDATE"] == "1"
 	cfg.UpdateProxy = strings.TrimSpace(values["UPDATE_PROXY"])
 	cfg.TerminalEnabled = values["TERMINAL_ENABLED"] == "1"
+	var sshErr error
+	cfg.SSHLoginEnabled, sshErr = normalizeBinaryValue(values["SSH_LOGIN_ENABLED"], false)
+	if sshErr != nil {
+		return cfg, errors.New("invalid SSH_LOGIN_ENABLED")
+	}
 	cfg.NodeToken = values["NODE_TOKEN"]
 	cfg.ConfigMD5 = values["CONFIG_MD5"]
 	if cfg.ConfigMD5 == "" {
@@ -269,6 +274,7 @@ func stageConfig(path string, cfg Config) (string, error) {
 	}
 	writeKV("UPDATE_PROXY", cfg.UpdateProxy)
 	writeKV("TERMINAL_ENABLED", boolInt(cfg.TerminalEnabled))
+	writeKV("SSH_LOGIN_ENABLED", boolInt(cfg.SSHLoginEnabled))
 	writeKV("NODE_TOKEN", cfg.NodeToken)
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"

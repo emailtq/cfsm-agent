@@ -20,12 +20,15 @@ import (
 )
 
 type Agent struct {
-	cfg     Config
-	cfgMu   sync.RWMutex
-	paths   Paths
-	log     logger
-	version string
-	ctx     context.Context
+	cfg       Config
+	cfgMu     sync.RWMutex
+	paths     Paths
+	log       logger
+	version   string
+	ctx       context.Context
+	sshEvents *sshEventCollector
+	sshCancel context.CancelFunc
+	sshDone   chan struct{}
 	// cfgMu protects synchronous identity-change cancellation, including coalesced A-B-A changes.
 	terminalControlCancel context.CancelFunc
 	terminalMu            sync.Mutex
@@ -55,6 +58,7 @@ type Agent struct {
 	lastPostAttempt          time.Time
 	lastConfigStateReportAt  time.Time
 	lastConfigStateReportMD5 string
+	lastSSHReportState       string
 	// 上一次被拒的配置原因：同一份坏配置服务端会持续重发，只提示一次。
 	lastConfigRejectKey string
 	updateMu            sync.Mutex
@@ -230,6 +234,8 @@ func Run(configFile string, debug bool, version string) error {
 		terminalChanged: make(chan struct{}, 1),
 	}
 	a.startTerminal(ctx)
+	a.startSSHEvents(ctx)
+	defer a.stopSSHEvents()
 	defer a.stopTerminal()
 	a.resetNetworkBaseline(cfg.Interface)
 	a.reporter = newReportTransport(a)
@@ -820,6 +826,7 @@ func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, err
 }
 
 func (a *Agent) buildReportBodyForConfig(cfg Config, m Metrics, reportAt time.Time) ([]byte, int, error) {
+	reportConfig := a.shouldReportConfigState(firstNonEmpty(cfg.ConfigMD5, "none"), reportAt)
 	payload := map[string]any{
 		"time":             a.clock.snapshot(reportAt),
 		"metrics":          a.metricsForReport(m, reportAt),
@@ -827,10 +834,21 @@ func (a *Agent) buildReportBodyForConfig(cfg Config, m Metrics, reportAt time.Ti
 		"report_interval":  cfg.ReportInterval,
 		"terminal_enabled": cfg.TerminalEnabled,
 	}
+	if a.sshEvents != nil {
+		ssh := a.sshEvents.snapshotForConfig(cfg)
+		for i := range ssh.Events {
+			ssh.Events[i].OccurredAt = a.clock.correctLocalTimestamp(ssh.Events[i].OccurredAt, reportAt)
+		}
+		state := ssh.Stream + ":" + ssh.State + ":" + ssh.Source
+		if len(ssh.Events) > 0 || reportConfig || state != a.lastSSHReportState {
+			payload["ssh_events"] = ssh
+			a.lastSSHReportState = state
+		}
+	}
 	if cfg.ServerID != "" {
 		payload["id"] = cfg.ServerID
 	}
-	if a.shouldReportConfigState(firstNonEmpty(cfg.ConfigMD5, "none"), reportAt) {
+	if reportConfig {
 		payload["config_schema"] = configSchemaVersion
 		payload["config_md5"] = firstNonEmpty(cfg.ConfigMD5, "none")
 	}
@@ -928,6 +946,10 @@ func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, heade
 	a.log.debugf("report response http=%d bytes=%d", statusCode, len(respBody))
 	if statusCode < 200 || statusCode >= 300 {
 		return
+	}
+	var sshAck sshEventAck
+	if json.Unmarshal([]byte(headers.Get("X-CFSM-Ssh-Ack")), &sshAck) == nil {
+		a.ackSSHEvents(sshAck)
 	}
 	// 自定义 UA 走独立通道，与配置 md5 无关；值相同时这里只做一次字符串比较。
 	a.applyRemoteUserAgent(headers.Get(agentUAHeader))
@@ -1158,6 +1180,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		"node_4":              true,
 		"extra_ping_nodes":    true,
 		"latency_tasks":       true,
+		"ssh_login_enabled":   true,
 		"interface":           true,
 		"connection_mode":     true,
 		"ping_mode":           true,
@@ -1216,25 +1239,32 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if reset < 0 || reset > 31 {
 		return fmt.Errorf("invalid reset_day %d", reset)
 	}
-	if values.Get("schema_version") != configSchemaVersion && values.Get("schema_version") != "8" && values.Get("schema_version") != "7" {
+	if values.Get("schema_version") != configSchemaVersion && values.Get("schema_version") != "9" && values.Get("schema_version") != "8" && values.Get("schema_version") != "7" {
 		return fmt.Errorf("invalid schema_version %s", values.Get("schema_version"))
 	}
 	if values.Get("schema_version") == "7" && len(body) > 1024 {
 		return errors.New("response too large")
 	}
-	if len(values["extra_ping_nodes"]) > 1 || (values.Has("extra_ping_nodes") && values.Get("schema_version") != "8" && values.Get("schema_version") != "9") {
+	if len(values["extra_ping_nodes"]) > 1 || (values.Has("extra_ping_nodes") && values.Get("schema_version") != "8" && values.Get("schema_version") != "9" && values.Get("schema_version") != "10") {
 		return errors.New("invalid extra ping schema")
 	}
 	extraNodes, err := decodeExtraPingNodes(values.Get("extra_ping_nodes"))
 	if err != nil {
 		return err
 	}
-	if len(values["latency_tasks"]) > 1 || (values.Has("latency_tasks") && values.Get("schema_version") != "9") {
+	if len(values["latency_tasks"]) > 1 || (values.Has("latency_tasks") && values.Get("schema_version") != "9" && values.Get("schema_version") != "10") {
 		return errors.New("invalid latency schema")
 	}
 	latencyTasks, err := decodeLatencyTasks(values.Get("latency_tasks"))
 	if err != nil {
 		return err
+	}
+	if len(values["ssh_login_enabled"]) > 1 || (values.Has("ssh_login_enabled") && values.Get("schema_version") != "10") {
+		return errors.New("invalid SSH event schema")
+	}
+	sshEnabled, err := normalizeBinaryValue(values.Get("ssh_login_enabled"), false)
+	if err != nil {
+		return errors.New("invalid SSH event enable value")
 	}
 	if report < collect {
 		return errors.New("report_interval less than collect_interval")
@@ -1261,7 +1291,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	} else {
 		shouldApply = remoteConfigDiffers(cfg, values, effectiveCollect, report, reset, iface, connectionMode, pingMode) || !equalExtraPingNodes(cfg.ExtraPingNodes, extraNodes) || encodeLatencyTasks(cfg.LatencyTasks) != encodeLatencyTasks(latencyTasks)
 	}
-	if shouldApply {
+	if shouldApply || cfg.SSHLoginEnabled != sshEnabled {
 		nextCfg := cfg
 		nextCfg.CollectInterval = effectiveCollect
 		nextCfg.ReportInterval = report
@@ -1276,6 +1306,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		nextCfg.Node4 = values.Get("node_4")
 		nextCfg.ExtraPingNodes = extraNodes
 		nextCfg.LatencyTasks = latencyTasks
+		nextCfg.SSHLoginEnabled = sshEnabled
 		nextCfg.Interface = iface
 		nextCfg.ConnectionMode = connectionMode
 		nextCfg.PingMode = pingMode
