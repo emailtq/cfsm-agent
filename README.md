@@ -8,13 +8,13 @@
 
 未激活统一任务时继续原固定槽/额外探测合同。现有 v1.2.0/schema 8 Agent 仍可接收兼容目标关联，但维持原约 20 秒采集周期，不执行每任务间隔。系统采集和上报间隔仍独立控制资源指标与传输。数量不设业务上限，原配置/上报字节限制、TCP/ICMP 行为及凭据边界保持有效；大量超时目标可能推迟后续串行探测。
 
-此处是源码能力说明，没有发布或安装新二进制。迁移、历史身份和删除语义见 Worker 仓库的 `docs/latency-tasks.md`。
+支持 schema 9 的 [v1.3.0](https://github.com/emailtq/cfsm-agent/releases/tag/v1.3.0) 已发布。已启用自动更新的节点按既有周期升级，其他节点从后台安装入口指定 v1.3.0；发布不会主动重装节点。迁移、历史身份和删除语义见 Worker 仓库的 `docs/latency-tasks.md`。
 
 ## 快速安装
 
 HTTP POST、WSS GET Upgrade 和终端均使用 `Authorization: Bearer <NODE_TOKEN>`，凭据不进入 JSON 或 URL。ID 仅用于非秘密标识，提供时必须与 token 所属节点一致。安装命令仍可能通过终端历史、进程参数、剪贴板或截图泄露，请仅在受信环境使用。
 
-旧版本不支持此协议。本次未发布新版；安装器会检查 `-token-file` / `-register-key` 能力，旧 release 安装失败。指定版本示例中的 `TOKEN_CAPABLE_RELEASE` 必须替换为实际支持的新 release。
+v1.3.0 支持此协议。安装器会检查 `-token-file` / `-register-key` 能力，不支持这些参数的旧 release 会拒绝安装。以下安装与卸载示例使用面板同样的 `terminal` 分支脚本。
 
 从面板或后台获取以下 3 个参数：
 
@@ -25,13 +25,13 @@ HTTP POST、WSS GET Upgrade 和终端均使用 `Authorization: Bearer <NODE_TOKE
 Linux、OpenWrt、Synology DSM、FreeBSD、macOS 可使用安装脚本自动下载当前系统对应的最新 release：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.sh | sh -s -- install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 如果系统没有 `curl`，可使用 `wget`：
 
 ```bash
-wget -O- https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
+wget -O- https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.sh | sh -s -- install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 ### 普通用户安装（非 root）
@@ -45,20 +45,20 @@ wget -O- https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | 
 Linux、OpenWrt、Synology DSM、FreeBSD、macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -register-key=REGISTRATION_KEY -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.sh | sh -s -- install -register-key=REGISTRATION_KEY -url=WORKER_URL
 ```
 
 指定服务器名称（不传则使用本机公网 IPv4，没有 IPv4 时使用 IPv6）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install -register-key=REGISTRATION_KEY -url=WORKER_URL -name=hk-1
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.sh | sh -s -- install -register-key=REGISTRATION_KEY -url=WORKER_URL -name=hk-1
 ```
 
 Windows（管理员 PowerShell）：
 
 ```powershell
 $script = "$env:TEMP\install-cf-probe.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.ps1" -OutFile $script -UseBasicParsing
 PowerShell -ExecutionPolicy Bypass -File $script install -register-key=REGISTRATION_KEY -url=WORKER_URL -name=hk-1
 ```
 
@@ -74,7 +74,7 @@ PowerShell -ExecutionPolicy Bypass -File $script install -register-key=REGISTRAT
 # Windows 8 / Server 2012 R2 默认只启用 TLS 1.0，GitHub 要求 TLS 1.2+
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $script = "$env:TEMP\install-cf-probe.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.ps1" -OutFile $script -UseBasicParsing
 PowerShell -ExecutionPolicy Bypass -File $script install -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
@@ -85,13 +85,13 @@ Windows 上如果安装时开启 `-auto_update=1`，自动更新会下载并执�
 默认安装最新 release。需要指定版本时：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install --install-version=TOKEN_CAPABLE_RELEASE -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.sh | sh -s -- install --install-version=v1.3.0 -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 GitHub 下载较慢时，可以配置代理前缀：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- install --install-ghproxy=https://gh-proxy.example.com -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.sh | sh -s -- install --install-ghproxy=https://gh-proxy.example.com -id=SERVER_ID -token=NODE_TOKEN -url=WORKER_URL
 ```
 
 ## 常用安装参数
@@ -113,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh 
 | `-interface=IFACES` | 指定统计网卡，多个用英文逗号分隔 | 自动汇总 |
 | `-reset_day=N` | 每月流量重置日，`1-31`；`0` 表示不重置 | `1` |
 | `-connection_mode=auto\|http` | 连接模式；`auto` 优先 WSS 实时上报并在不可用时 POST 兜底，`http` 仅按上报间隔 POST | `auto` |
-| `-ping_mode=tcp\|icmp` | Ping 探测模式；`tcp` 使用 TCP 连接探测，`icmp` 使用 ICMP 探测；两者均每 20 秒采样一次并按 2 分钟窗口聚合 | `tcp` |
+| `-ping_mode=tcp\|icmp` | Ping 探测模式；`tcp` 使用 TCP 连接探测，`icmp` 使用 ICMP 探测；中央任务按各自间隔探测，未激活时每 20 秒采样，均按 2 分钟窗口聚合 | `tcp` |
 | `-ua=UA` | 上报请求使用的 User-Agent；仅允许字母、数字、空格与 `. _ - / , : ; ( ) + = @ # * ? ~`，≤100 字符。服务端可通过 `X-Ua`（HTTP）或 WSS ack 的 `ua` 字段覆盖，以面板设置为准 | `cfsm` |
 | `-auto_update=0\|1` | 是否开启自动检查更新 | `0` |
 | `-terminal=0\|1` | 仅本地 Linux 终端知情同意；远程配置不能开启 | `0` |
@@ -140,7 +140,7 @@ curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh 
 
 额外目标由既有网络 worker 顺序探测，复用每 20 秒调度和两分钟滚动窗口；数量增加可能使整轮耗时超过调度间隔，不为每个目标启动 goroutine。报告 `metrics.extra_probes` 只发送稳定 ID 与 `{ping,loss}`，不发送目标地址；额外目标不进入高频 CPU/内存 `samples`。
 
-先更新 Worker，再使用支持 schema 8 的 Agent 构建启用额外目标。以请求头 `X-Agent-Config-Schema: 8` 或报告 `config_schema: "8"` 确认能力；本次源码更新不代表现有 release 二进制已更新。配置按 64 KiB JSON 字节预算校验，没有目标数量上限。
+v1.2.0 支持 schema 8 额外目标；v1.3.0 使用 schema 9，并在未激活中央任务时保持上述采集行为。先更新 Worker，再升级 Agent；可通过请求头 `X-Agent-Config-Schema` 或报告 `config_schema` 确认版本。配置按 64 KiB JSON 字节预算校验，没有目标数量上限。
 
 ## 可选 Linux 终端
 
@@ -259,7 +259,7 @@ Get-Content "C:\ProgramData\cf-probe\cf-probe.log" -Wait
 Linux、OpenWrt、Synology DSM、FreeBSD、macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh | sh -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.sh | sh -s -- uninstall
 ```
 
 普通用户执行卸载只清理当前用户的 `~/.cf-probe/`、支持 `systemd --user` 的 Linux 用户服务或 macOS LaunchAgent 自启动项；Synology DSM、OpenWrt、Alpine/OpenRC 以及其他系统级安装请使用 root 权限卸载。root 执行卸载清理系统级安装。macOS root 卸载会同时清理 sudo 调用者对应的用户版安装；旧 root/system 版请先执行 `sudo /usr/local/bin/cf-probe uninstall` 清理，再以普通用户安装。
@@ -268,7 +268,7 @@ Windows 请使用管理员权限打开 PowerShell：
 
 ```powershell
 $script = "$env:TEMP\install-cf-probe.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/emailtq/cfsm-agent/terminal/install.ps1" -OutFile $script -UseBasicParsing
 PowerShell -ExecutionPolicy Bypass -File $script uninstall
 ```
 
@@ -422,7 +422,7 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 | `samples` | array | 可选，仅 `COLLECT_INTERVAL > 0` 时存在 |
 | `collect_interval` | number | 高频采样间隔，单位秒；`0` 表示不启用高频采样 |
 | `report_interval` | number | 上报间隔，单位秒 |
-| `config_schema` | string | 动态配置协议版本，当前源码为 `8`（原八槽兼容 `7`）；WSS 建连 query、首次上报、约每 60 秒或 MD5 变化时携带 |
+| `config_schema` | string | 动态配置协议版本，v1.3.0 为 `9`（额外目标兼容 `8`，原八槽兼容 `7`）；WSS 建连 query、首次上报、约每 60 秒或 MD5 变化时携带 |
 | `config_md5` | string | 本地保存的远端配置 MD5；首次或为空时为 `none`，WSS 建连 query 与消息字段携带，POST 保留 `X-Agent-Config-Md5` Header |
 
 `time` 字段：
