@@ -162,6 +162,12 @@ func collectExtraPing(ctx context.Context, cfg Config, now time.Time, histories 
 
 func extraProbeMetrics(cfg Config, probes map[string]extraProbeSnapshot) map[string]extraProbeMetric {
 	metrics := map[string]extraProbeMetric{}
+	if cfg.LatencyTasks != nil {
+		cfg.ExtraPingNodes = nil
+		for _, task := range cfg.LatencyTasks {
+			cfg.ExtraPingNodes = append(cfg.ExtraPingNodes, ExtraPingNode{ID: task.ID, Target: task.Target})
+		}
+	}
 	for _, node := range cfg.ExtraPingNodes {
 		if node.Target == "" {
 			metrics[node.ID] = extraProbeMetric{Ping: false, Loss: false}

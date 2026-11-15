@@ -7,7 +7,7 @@ const (
 	legacyAgentVersion          = "1.0.0"
 	maxTrafficCorrectionGB      = 1000000
 	autoUpdateDelay             = 60 * time.Second
-	configSchemaVersion         = "8"
+	configSchemaVersion         = "9"
 	defaultReportIntervalSec    = 60
 	defaultWSSReportIntervalSec = 2
 	// 单个上报窗口的硬上限：正常 60s/2s 窗口约 30 条，只有 REPORT_INTERVAL 远大于
@@ -39,6 +39,7 @@ type Config struct {
 	Node3           string
 	Node4           string
 	ExtraPingNodes  []ExtraPingNode
+	LatencyTasks    []LatencyTask
 	Interface       string
 	ResetDay        int
 	ConnectionMode  string

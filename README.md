@@ -2,6 +2,14 @@
 
 `cfsm-agent` 是 CF-Server-Monitor 的 Go Probe Agent，安装后会以 `cf-probe` 服务运行，定时采集服务器资源、网络流量和探测数据，并上报到指定的 Worker 地址。
 
+## 统一延迟任务（schema 9）
+
+先更新 Worker/前端，再升级 Agent。目标、运行节点与 5–3600 秒间隔在后台「延迟」统一管理；不要在节点本地重新填写目标覆盖。新 Agent 按节点关联接收任务，由现有单个网络 worker 串行探测，配置持久化于 `LATENCY_TASKS`，报告仅携带指标 ID、延迟和丢包率。
+
+未激活统一任务时继续原固定槽/额外探测合同。现有 v1.2.0/schema 8 Agent 仍可接收兼容目标关联，但维持原约 20 秒采集周期，不执行每任务间隔。系统采集和上报间隔仍独立控制资源指标与传输。数量不设业务上限，原配置/上报字节限制、TCP/ICMP 行为及凭据边界保持有效；大量超时目标可能推迟后续串行探测。
+
+此处是源码能力说明，没有发布或安装新二进制。迁移、历史身份和删除语义见 Worker 仓库的 `docs/latency-tasks.md`。
+
 ## 快速安装
 
 HTTP POST、WSS GET Upgrade 和终端均使用 `Authorization: Bearer <NODE_TOKEN>`，凭据不进入 JSON 或 URL。ID 仅用于非秘密标识，提供时必须与 token 所属节点一致。安装命令仍可能通过终端历史、进程参数、剪贴板或截图泄露，请仅在受信环境使用。

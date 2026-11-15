@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -178,6 +179,14 @@ func readConfig(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	latencyRaw, err := url.QueryUnescape(values["LATENCY_TASKS"])
+	if err != nil {
+		return cfg, err
+	}
+	cfg.LatencyTasks, err = decodeLatencyTasks(latencyRaw)
+	if err != nil {
+		return cfg, err
+	}
 	cfg.Interface, _ = normalizeInterfaceList(values["INTERFACE"])
 	cfg.ResetDay = parseIntDefault(values["RESET_DAY"], cfg.ResetDay)
 	cfg.ConnectionMode, _ = normalizeConnectionMode(values["CONNECTION_MODE"])
@@ -247,6 +256,7 @@ func stageConfig(path string, cfg Config) (string, error) {
 	writeKV("NODE_3", cfg.Node3)
 	writeKV("NODE_4", cfg.Node4)
 	writeKV("EXTRA_PING_NODES", encodeExtraPingNodes(cfg.ExtraPingNodes))
+	writeKV("LATENCY_TASKS", encodeLatencyTasks(cfg.LatencyTasks))
 	writeKV("INTERFACE", cfg.Interface)
 	writeKV("RESET_DAY", strconv.Itoa(cfg.ResetDay))
 	writeKV("CONNECTION_MODE", cfg.ConnectionMode)
