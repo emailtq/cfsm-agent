@@ -131,6 +131,7 @@ func parseKVFile(path string) (map[string]string, error) {
 func parseKVReader(reader io.Reader) (map[string]string, error) {
 	values := map[string]string{}
 	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), maxRemoteConfigBytes)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -173,6 +174,10 @@ func readConfig(path string) (Config, error) {
 	cfg.Node2 = values["NODE_2"]
 	cfg.Node3 = values["NODE_3"]
 	cfg.Node4 = values["NODE_4"]
+	cfg.ExtraPingNodes, err = extraPingConfigFromFile(values["EXTRA_PING_NODES"])
+	if err != nil {
+		return cfg, err
+	}
 	cfg.Interface, _ = normalizeInterfaceList(values["INTERFACE"])
 	cfg.ResetDay = parseIntDefault(values["RESET_DAY"], cfg.ResetDay)
 	cfg.ConnectionMode, _ = normalizeConnectionMode(values["CONNECTION_MODE"])
@@ -217,6 +222,9 @@ func stageConfig(path string, cfg Config) (string, error) {
 	}
 	normalizeConfigIntervals(&cfg)
 	var buf bytes.Buffer
+	if err := validateExtraPingEncoding(cfg.ExtraPingNodes); err != nil {
+		return "", err
+	}
 	var valueErr error
 	writeKV := func(k, v string) {
 		if strings.ContainsAny(v, "\r\n\x00") {
@@ -238,6 +246,7 @@ func stageConfig(path string, cfg Config) (string, error) {
 	writeKV("NODE_2", cfg.Node2)
 	writeKV("NODE_3", cfg.Node3)
 	writeKV("NODE_4", cfg.Node4)
+	writeKV("EXTRA_PING_NODES", encodeExtraPingNodes(cfg.ExtraPingNodes))
 	writeKV("INTERFACE", cfg.Interface)
 	writeKV("RESET_DAY", strconv.Itoa(cfg.ResetDay))
 	writeKV("CONNECTION_MODE", cfg.ConnectionMode)

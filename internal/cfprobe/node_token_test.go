@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -130,7 +131,7 @@ func TestNodeTokenExplicitReinstallDiscardsRejectedConfig(t *testing.T) {
 	if err := prepareInstallCredentials(&opts, rejected, errors.New("private config rejected")); err != nil {
 		t.Fatal("explicit replacement still blocked", err)
 	}
-	if opts.Config != newCfg {
+	if !reflect.DeepEqual(opts.Config, newCfg) {
 		t.Fatal("reinstall reused untrusted config contents")
 	}
 	opts = InstallOptions{Config: defaultConfig(), Explicit: map[string]bool{}}

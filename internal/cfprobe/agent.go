@@ -725,6 +725,7 @@ func (a *Agent) buildMetrics(cfg Config, cpu string, netNow NetBytes, rxSpeed, t
 		LossNode2:    probeLossValue(cfg.Node2, probes.Node2),
 		LossNode3:    probeLossValue(cfg.Node3, probes.Node3),
 		LossNode4:    probeLossValue(cfg.Node4, probes.Node4),
+		ExtraProbes:  extraProbeMetrics(cfg, probes.Extra),
 	}
 }
 
@@ -890,7 +891,7 @@ func (a *Agent) postReportBody(cfg Config, body []byte, sampleCount int, fallbac
 	}
 	headerReceived := time.Now()
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRemoteConfigBytes+1))
 	respHeaders := resp.Header
 	reportHTTPCode := resp.StatusCode
 	a.handleTimedReportResponse(reportHTTPCode, respBody, respHeaders, started, headerReceived)
@@ -1007,6 +1008,7 @@ func valueOrZero[T ~int64 | ~uint64](value *T) T {
 func (a *Agent) networkWorker(ctx context.Context) {
 	var lastIP, lastProbe time.Time
 	var ctHistory, cuHistory, cmHistory, bdHistory, node1History, node2History, node3History, node4History rollingProbeHistory
+	extraHistories := map[string]*rollingProbeHistory{}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -1041,11 +1043,15 @@ func (a *Agent) networkWorker(ctx context.Context) {
 				snap.Node2 = node2History.snapshot(now)
 				snap.Node3 = node3History.snapshot(now)
 				snap.Node4 = node4History.snapshot(now)
+				snap.Extra = collectExtraPing(ctx, cfg, now, extraHistories, a.log)
 				lastProbe = now
 				needUpdate = true
 			}
 			if needUpdate {
 				a.mu.Lock()
+				if snap.Extra == nil {
+					snap.Extra = a.probes.Extra
+				}
 				if snap.IPv4 == "" {
 					snap.IPv4 = a.probes.IPv4
 				}
@@ -1116,7 +1122,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if len(body) == 0 {
 		return errors.New("empty body")
 	}
-	if len(body) > 1024 {
+	if len(body) > maxRemoteConfigBytes {
 		return errors.New("response too large")
 	}
 	raw := strings.TrimSpace(string(body))
@@ -1144,6 +1150,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		"node_2":              true,
 		"node_3":              true,
 		"node_4":              true,
+		"extra_ping_nodes":    true,
 		"interface":           true,
 		"connection_mode":     true,
 		"ping_mode":           true,
@@ -1202,8 +1209,18 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if reset < 0 || reset > 31 {
 		return fmt.Errorf("invalid reset_day %d", reset)
 	}
-	if values.Get("schema_version") != configSchemaVersion {
+	if values.Get("schema_version") != configSchemaVersion && values.Get("schema_version") != "7" {
 		return fmt.Errorf("invalid schema_version %s", values.Get("schema_version"))
+	}
+	if values.Get("schema_version") == "7" && len(body) > 1024 {
+		return errors.New("response too large")
+	}
+	if len(values["extra_ping_nodes"]) > 1 || (values.Has("extra_ping_nodes") && values.Get("schema_version") != "8") {
+		return errors.New("invalid extra ping schema")
+	}
+	extraNodes, err := decodeExtraPingNodes(values.Get("extra_ping_nodes"))
+	if err != nil {
+		return err
 	}
 	if report < collect {
 		return errors.New("report_interval less than collect_interval")
@@ -1228,7 +1245,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if hasRemoteMD5 {
 		shouldApply = newMD5 != cfg.ConfigMD5
 	} else {
-		shouldApply = remoteConfigDiffers(cfg, values, effectiveCollect, report, reset, iface, connectionMode, pingMode)
+		shouldApply = remoteConfigDiffers(cfg, values, effectiveCollect, report, reset, iface, connectionMode, pingMode) || !equalExtraPingNodes(cfg.ExtraPingNodes, extraNodes)
 	}
 	if shouldApply {
 		nextCfg := cfg
@@ -1243,6 +1260,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		nextCfg.Node2 = values.Get("node_2")
 		nextCfg.Node3 = values.Get("node_3")
 		nextCfg.Node4 = values.Get("node_4")
+		nextCfg.ExtraPingNodes = extraNodes
 		nextCfg.Interface = iface
 		nextCfg.ConnectionMode = connectionMode
 		nextCfg.PingMode = pingMode

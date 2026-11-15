@@ -259,6 +259,9 @@ func parseNvidiaFloat(raw string) any {
 }
 
 func metricsToMap(m Metrics) map[string]any {
+	if m.ExtraProbes == nil {
+		m.ExtraProbes = map[string]extraProbeMetric{}
+	}
 	return map[string]any{
 		"cpu":            m.CPU,
 		"ram_total":      m.RAMTotal,
@@ -303,6 +306,7 @@ func metricsToMap(m Metrics) map[string]any {
 		"loss_node_2":    m.LossNode2,
 		"loss_node_3":    m.LossNode3,
 		"loss_node_4":    m.LossNode4,
+		"extra_probes":   m.ExtraProbes,
 	}
 }
 

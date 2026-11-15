@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +67,7 @@ func TestNodeRegistrationInvalidResponseAndNoMutation(t *testing.T) {
 			defer server.Close()
 			cfg := Config{WorkerURL: server.URL + "/update", ServerID: "existing", ReportInterval: 123}
 			got, err := registerNode(t.Context(), cfg, testNodeToken, server.Client())
-			if err == nil || got != cfg || strings.Contains(err.Error(), testNodeToken) {
+			if err == nil || !reflect.DeepEqual(got, cfg) || strings.Contains(err.Error(), testNodeToken) {
 				t.Fatal("malformed response mutated config or leaked token", err)
 			}
 		})
@@ -113,7 +114,7 @@ func TestNodeRegistrationHTTPFailureAndNameBound(t *testing.T) {
 func TestNodeRegistrationReinstallReuseAndLegacyMigration(t *testing.T) {
 	saved := Config{WorkerURL: "https://example.invalid/update", ServerID: "node", NodeToken: testNodeToken, TerminalEnabled: false, ReportInterval: 123, CTNode: "keep"}
 	opts := InstallOptions{Config: defaultConfig(), RegisterKey: strings.Repeat("b", 64), Explicit: map[string]bool{"register_key": true}}
-	if err := prepareInstallCredentials(&opts, saved, nil); err != nil || opts.Config != saved || opts.RegisterKey != "" {
+	if err := prepareInstallCredentials(&opts, saved, nil); err != nil || !reflect.DeepEqual(opts.Config, saved) || opts.RegisterKey != "" {
 		t.Fatal("reinstall registered again or lost local config", err)
 	}
 	legacy := saved

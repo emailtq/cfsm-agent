@@ -574,8 +574,18 @@ func wssConfigPayload(payload any) (string, string, map[string]string) {
 			"collect_interval", "report_interval", "wss_report_interval", "reset_day", "schema_version", "interface", "connection_mode", "ping_mode",
 			"custom_ct", "custom_cu", "custom_cm", "custom_bd", "node_1", "node_2", "node_3", "node_4",
 			"rx_correction", "tx_correction", "update",
+			"extra_ping_nodes",
 		} {
 			if raw, ok := value[key]; ok {
+				if key == "extra_ping_nodes" {
+					if _, isString := raw.(string); !isString {
+						encoded, err := json.Marshal(raw)
+						if err == nil {
+							values.Set(key, string(encoded))
+						}
+						continue
+					}
+				}
 				values.Set(key, wssStringFromAny(raw))
 			}
 		}

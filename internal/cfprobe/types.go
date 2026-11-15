@@ -7,7 +7,7 @@ const (
 	legacyAgentVersion          = "1.0.0"
 	maxTrafficCorrectionGB      = 1000000
 	autoUpdateDelay             = 60 * time.Second
-	configSchemaVersion         = "7"
+	configSchemaVersion         = "8"
 	defaultReportIntervalSec    = 60
 	defaultWSSReportIntervalSec = 2
 	// 单个上报窗口的硬上限：正常 60s/2s 窗口约 30 条，只有 REPORT_INTERVAL 远大于
@@ -38,6 +38,7 @@ type Config struct {
 	Node2           string
 	Node3           string
 	Node4           string
+	ExtraPingNodes  []ExtraPingNode
 	Interface       string
 	ResetDay        int
 	ConnectionMode  string
@@ -100,6 +101,7 @@ type ProbeSnapshot struct {
 	Node2 ProbeResult
 	Node3 ProbeResult
 	Node4 ProbeResult
+	Extra map[string]extraProbeSnapshot
 }
 
 type Metrics struct {
@@ -146,6 +148,7 @@ type Metrics struct {
 	LossNode2    any
 	LossNode3    any
 	LossNode4    any
+	ExtraProbes  map[string]extraProbeMetric
 }
 
 type BasicStats struct {

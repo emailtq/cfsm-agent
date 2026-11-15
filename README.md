@@ -126,6 +126,14 @@ curl -fsSL https://raw.githubusercontent.com/emailtq/cfsm-agent/main/install.sh 
 
 更新检查（`api.github.com`）、新二进制下载（`github.com`）、指标上报以及公网 IP 查询的 DNS 解析默认使用系统原生 DNS；仅在配置了 `--install-ghproxy`（通常为系统 DNS 被污染的国内服务器）或通过环境变量 `CF_PROBE_UPDATE_DNS` 显式指定 DNS 服务器时，才启用 Agent 内置的公共 DNS 轮询解析（阿里、DNSPod、114、Cloudflare、Google，UDP 53），此时不依赖系统 DNS，内置 DNS 全部不可用时回退系统 DNS。`CF_PROBE_UPDATE_DNS` 会自动补全 `:53` 端口（如 `CF_PROBE_UPDATE_DNS=223.5.5.5`）。root/system 模式更新时 Agent 会把新二进制下载到配置目录，再调度新二进制执行自身的 `install` 完成替换并重启服务；普通用户模式按上一段直接自替换。两种模式都不经过 install.sh 和 curl；下载或调度失败时旧版本不受影响，下次检查自动重试。如 `github.com` 完全不可达，可配置 `--install-ghproxy` 代理（仅用于二进制文件下载；`api.github.com` 的版本检查始终直连，gh-proxy 类服务不支持 API 转发）。
 
+## 额外 Ping 目标（配置 schema 8）
+
+本源码支持由 Worker 下发的 `extra_ping_nodes` 数组，每项为 `{id,target}`。ID 稳定，名称仅留在面板；HTTP 查询串使用 URL 编码 JSON，WSS 同时支持配置串及结构化数组。私有配置文件的 `EXTRA_PING_NODES` 保存 URL 编码 JSON。原八槽、原安装参数和 schema 7 配置仍可使用。
+
+额外目标由既有网络 worker 顺序探测，复用每 20 秒调度和两分钟滚动窗口；数量增加可能使整轮耗时超过调度间隔，不为每个目标启动 goroutine。报告 `metrics.extra_probes` 只发送稳定 ID 与 `{ping,loss}`，不发送目标地址；额外目标不进入高频 CPU/内存 `samples`。
+
+先更新 Worker，再使用支持 schema 8 的 Agent 构建启用额外目标。以请求头 `X-Agent-Config-Schema: 8` 或报告 `config_schema: "8"` 确认能力；本次源码更新不代表现有 release 二进制已更新。配置按 64 KiB JSON 字节预算校验，没有目标数量上限。
+
 ## 可选 Linux 终端
 
 终端默认关闭，不是 SSH。监控与终端共用 NODE_TOKEN，但本地 `-terminal=1`、站点/节点授权、管理员浏览器票据仍独立必需。关闭终端不影响监控、不旋转 token；重置节点 token 影响两个通道。远端配置和配置 MD5 不携带或覆盖 token、本地 consent。
@@ -406,7 +414,7 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 | `samples` | array | 可选，仅 `COLLECT_INTERVAL > 0` 时存在 |
 | `collect_interval` | number | 高频采样间隔，单位秒；`0` 表示不启用高频采样 |
 | `report_interval` | number | 上报间隔，单位秒 |
-| `config_schema` | string | 动态配置协议版本，当前为 `6`；WSS 建连 query、首次上报、约每 60 秒或 MD5 变化时携带 |
+| `config_schema` | string | 动态配置协议版本，当前源码为 `8`（原八槽兼容 `7`）；WSS 建连 query、首次上报、约每 60 秒或 MD5 变化时携带 |
 | `config_md5` | string | 本地保存的远端配置 MD5；首次或为空时为 `none`，WSS 建连 query 与消息字段携带，POST 保留 `X-Agent-Config-Md5` Header |
 
 `time` 字段：
