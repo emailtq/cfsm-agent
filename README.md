@@ -10,9 +10,9 @@
 
 支持 schema 9 的 [v1.3.0](https://github.com/emailtq/cfsm-agent/releases/tag/v1.3.0) 已发布。已启用自动更新的节点按既有周期升级，其他节点从后台安装入口指定 v1.3.0；发布不会主动重装节点。迁移、历史身份和删除语义见 Worker 仓库的 `docs/latency-tasks.md`。
 
-## SSH 成功认证事件（schema 10 源码，尚未发布）
+## SSH 成功认证事件（v1.4.0 / schema 10）
 
-本源码新增 Worker 下发的 `ssh_login_enabled=0|1` 和私有 `ssh_events.version=1` 报告。当前已发布 v1.3.0/schema 9 不包含采集器；先部署配套 Worker，再由后续发布提供 schema 10 Agent。普通监控和原配置入口继续可用。
+Worker 下发的 `ssh_login_enabled=0|1` 和私有 `ssh_events.version=1` 报告已随 [v1.4.0](https://github.com/emailtq/cfsm-agent/releases/tag/v1.4.0) 发布。先升级配套 Worker，再升级 schema 10 Agent；v1.3.0/schema 9 不包含采集器。已启用自动更新的节点按既有周期升级，其余节点通过后台安装／更新入口升级，发布不主动重装节点。普通监控和原配置入口继续可用。
 
 支持 Linux OpenSSH 的固定来源：优先读取已有 journalctl 中的 sshd／sshd-session／sshd-auth 记录，没有可读 journal 时尝试 `/var/log/auth.log` 或 `/var/log/secure`。只识别 `Accepted` 成功认证，不把本系统 PTY、失败尝试或会话关闭当作 SSH 登录。不接受网络下发的任意日志路径、命令，也不提权或修改 SSH／日志配置；权限不足、来源不可用、轮换缺口、队列满及非 Linux 平台会报告对应状态。
 
