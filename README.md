@@ -18,6 +18,8 @@ Worker 下发的 `ssh_login_enabled=0|1` 和私有 `ssh_events.version=1` 报告
 
 首次观察不回放旧日志。游标及最多 1024 个待确认事件保存于实际配置文件旁的私有 `ssh-events.json`，每次至多报告 32 个。HTTP `X-CFSM-Ssh-Ack` 和 WSS `ssh_ack` 确认 Worker 的持久化高水位；普通 2xx 或实时提示不能清队列。原始日志、指纹和凭据不进入报告，事件字段不进入资源指标或样本。详见配套 Worker 的 `docs/login-events.md`。
 
+[v1.4.1](https://github.com/emailtq/cfsm-agent/releases/tag/v1.4.1) 已发布 SSH 及时上报修复，schema 10 不变。每秒检查日志，新事件持久入队后唤醒既有 HTTP/WSS 上报，不等待通常 30–180 秒的指标报告周期；新批次及 ACK 后积压按一秒下限节流，没有事件时不增加报告。失败 POST、协议暂停与熔断仍按原规则，同一未 ACK 批次随正常报告重试。实际延迟还包括日志可见性、写盘、指标采集及网络耗时；节点升级后生效。
+
 ## 快速安装
 
 HTTP POST、WSS GET Upgrade 和终端均使用 `Authorization: Bearer <NODE_TOKEN>`，凭据不进入 JSON 或 URL。ID 仅用于非秘密标识，提供时必须与 token 所属节点一致。安装命令仍可能通过终端历史、进程参数、剪贴板或截图泄露，请仅在受信环境使用。
