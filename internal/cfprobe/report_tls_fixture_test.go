@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,10 +43,13 @@ func runReportTLSFixture(t *testing.T) bool {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1")
+	pattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(t.Name()), "/", "$/^") + "$"
+	cmd := exec.CommandContext(ctx, executable, "-test.run="+pattern, "-test.count=1", "-test.v")
 	cmd.Env = append(os.Environ(), "GODEBUG=x509usefallbackroots=1", "CFSM_REPORT_TEST_ROOT="+path)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("TLS report fixture: %v\n%s", err, output)
+	} else {
+		t.Logf("TLS report fixture:\n%s", output)
 	}
 	return true
 }

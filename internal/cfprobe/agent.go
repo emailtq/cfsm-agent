@@ -56,6 +56,9 @@ type Agent struct {
 	lastReport               time.Time
 	lastPost                 time.Time
 	lastPostAttempt          time.Time
+	lastPostFailed           bool
+	lastSSHReport            sshEventAck
+	lastSSHReportAt          time.Time
 	lastConfigStateReportAt  time.Time
 	lastConfigStateReportMD5 string
 	lastSSHReportState       string
@@ -313,6 +316,9 @@ func (a *Agent) tickInterval() time.Duration {
 	if collect := effectiveCollectInterval(cfg); collect > 0 {
 		active = durationGCD(active, collect)
 	}
+	if pending, delay := a.pendingSSHReport(cfg, time.Now()); pending.Sequence > 0 && delay < active {
+		active = delay
+	}
 	if active <= 0 {
 		return time.Second
 	}
@@ -547,13 +553,19 @@ func (a *Agent) tick() {
 	}
 	wssEnabled := a.usesWSSConfig(cfg)
 	wssConnected := wssEnabled && a.reporter != nil && a.reporter.connected()
-	shouldWSSReport := wssConnected && (a.lastReport.IsZero() || now.Sub(a.lastReport) >= a.currentWSSReportIntervalForConfig(cfg))
-	postDue := !wssConnected && (a.lastPost.IsZero() || now.Sub(a.lastPost) >= reportInterval)
+	sshPending, sshDelay := a.pendingSSHReport(cfg, now)
+	sshDue := sshPending.Sequence > 0 && sshDelay <= 0
+	attemptInterval := reportInterval
+	if sshDue && !a.lastPostFailed {
+		attemptInterval = time.Second
+	}
+	shouldWSSReport := wssConnected && (sshDue || a.lastReport.IsZero() || now.Sub(a.lastReport) >= a.currentWSSReportIntervalForConfig(cfg))
+	postDue := !wssConnected && (sshDue || a.lastPost.IsZero() || now.Sub(a.lastPost) >= reportInterval)
 	postAllowed := !wssEnabled || a.reporter == nil || a.reporter.postFallbackAllowed()
 	if postDue && !postAllowed && wssEnabled && a.reporter != nil {
 		a.reporter.logPostFallbackDelayed()
 	}
-	shouldPostReport := postDue && postAllowed && a.postAttemptAllowed(now, reportInterval)
+	shouldPostReport := postDue && postAllowed && a.postAttemptAllowed(now, attemptInterval)
 	shouldSample := false
 	if collectInterval := effectiveCollectInterval(cfg); collectInterval > 0 {
 		shouldSample = a.lastSample.IsZero() || now.Sub(a.lastSample) >= collectInterval
@@ -598,8 +610,43 @@ func (a *Agent) tick() {
 		a.appendSample(now, m)
 	}
 	if shouldWSSReport || shouldPostReport {
-		a.applyReportResult(a.sendReport(cfg, m, shouldWSSReport, shouldPostReport, reportInterval), now)
+		if a.sshEvents != nil {
+			if attempted := a.sshEvents.pendingReport(cfg, sshEventAck{}); attempted.Sequence > 0 {
+				a.lastSSHReport, a.lastSSHReportAt = attempted, now
+			}
+		}
+		a.applyReportResult(a.sendReport(cfg, m, shouldWSSReport, shouldPostReport, attemptInterval), now)
 	}
+}
+
+func (a *Agent) pendingSSHReport(cfg Config, now time.Time) (sshEventAck, time.Duration) {
+	if a.sshEvents == nil {
+		return sshEventAck{}, 0
+	}
+	pending := a.sshEvents.pendingReport(cfg, a.lastSSHReport)
+	if pending.Sequence == 0 {
+		return pending, 0
+	}
+	// New events and ACKed backlog may advance a report, never a failed POST's retry window.
+	delay := a.lastSSHReportAt.Add(time.Second).Sub(now)
+	if !a.usesWSSConfig(cfg) || a.reporter == nil || !a.reporter.connected() {
+		interval := time.Second
+		if a.lastPostFailed {
+			interval = time.Duration(cfg.ReportInterval) * time.Second
+		}
+		if retry := a.lastPostAttempt.Add(interval).Sub(now); retry > delay {
+			delay = retry
+		}
+	}
+	if pause := a.reportPauseRemaining(now); pause > delay {
+		delay = pause
+	}
+	if a.usesWSSConfig(cfg) && a.reporter != nil && !a.reporter.connected() {
+		if pause, _ := a.reporter.pauseDelay(); pause > delay {
+			delay = pause
+		}
+	}
+	return pending, delay
 }
 
 func (a *Agent) resetNetworkBaseline(iface string) {
@@ -795,6 +842,7 @@ func (a *Agent) sendReport(cfg Config, m Metrics, preferWSS, allowPOST bool, rep
 		return reportSendResult{}
 	}
 	a.lastPostAttempt = reportAt
+	a.lastPostFailed = true
 	statusCode, err := a.postReportBody(cfg, body, sampleCount, preferWSS)
 	if isAuthConfigHTTPStatus(statusCode) && a.reporter != nil {
 		a.reporter.delayProtocol(fmt.Sprintf("POST fallback http=%d", statusCode))
@@ -808,6 +856,7 @@ func (a *Agent) sendReport(cfg Config, m Metrics, preferWSS, allowPOST bool, rep
 		return reportSendResult{}
 	}
 	a.noteReportSuccess()
+	a.lastPostFailed = false
 	return reportSendResult{ok: true, viaPOST: true}
 }
 

@@ -65,6 +65,7 @@ type sshEventCollector struct {
 	code    string
 	offered int64
 	ctx     context.Context
+	wake    chan struct{}
 }
 
 var sshAcceptedRE = regexp.MustCompile(`^Accepted (password|publickey|keyboard-interactive/pam|hostbased|gssapi-with-mic) for ([^\x00-\x20\x7f]{1,64}) from ([0-9a-fA-F:.]{1,64}(?:%[A-Za-z0-9_.:-]{1,32})?) port [0-9]+(?: ssh[12])?(?:[: ].*)?$`)
@@ -185,8 +186,29 @@ func (c *sshEventCollector) save(next sshCollectorState) error {
 	if err != nil {
 		return err
 	}
+	queued := next.Sequence > c.state.Sequence || len(next.Events) > 0 && len(next.Events) < len(c.state.Events)
 	c.state = next
+	if queued {
+		signalReportTransportWake(c.wake)
+	}
 	return nil
+}
+
+func (c *sshEventCollector) pendingReport(cfg Config, attempted sshEventAck) sshEventAck {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !cfg.SSHLoginEnabled || len(c.state.Events) == 0 || c.state.Identity != sshConfigIdentity(cfg) {
+		return sshEventAck{}
+	}
+	count := len(c.state.Events)
+	if count > 32 {
+		count = 32
+	}
+	ack := sshEventAck{Stream: c.state.Stream, Sequence: c.state.Events[count-1].Sequence}
+	if ack.Stream == attempted.Stream && ack.Sequence <= attempted.Sequence {
+		return sshEventAck{}
+	}
+	return ack
 }
 func (c *sshEventCollector) snapshot() sshEventReport {
 	c.mu.Lock()
@@ -536,6 +558,7 @@ func (c *sshEventCollector) collect(cfg Config, now time.Time) {
 }
 func (a *Agent) startSSHEvents(ctx context.Context) {
 	a.sshEvents = newSSHEventCollector(filepath.Join(filepath.Dir(a.paths.ConfigFile), "ssh-events.json"))
+	a.sshEvents.wake = a.wake
 	ctx, a.sshCancel = context.WithCancel(ctx)
 	a.sshEvents.ctx = ctx
 	a.sshDone = make(chan struct{})

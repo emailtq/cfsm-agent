@@ -3,6 +3,11 @@
 package cfprobe
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +15,76 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSSHLinuxRealCollectorTickerToHTTPSAndDurableACK(t *testing.T) {
+	if runReportTLSFixture(t) {
+		return
+	}
+	dir := t.TempDir()
+	data := filepath.Join(dir, "records")
+	t.Setenv("CFSM_JOURNAL_RECORDS", data)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(dir, "journalctl"), []byte("#!/bin/sh\n/bin/cat \"$CFSM_JOURNAL_RECORDS\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(data, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan time.Time, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			SSH sshEventReport `json:"ssh_events"`
+		}
+		if json.NewDecoder(r.Body).Decode(&p) != nil || len(p.SSH.Events) != 1 {
+			t.Error("actual ticker omitted event")
+			return
+		}
+		received <- time.Now()
+		ack, _ := json.Marshal(sshEventAck{Stream: p.SSH.Stream, Sequence: 1})
+		w.Header().Set("X-CFSM-Ssh-Ack", string(ack))
+		fmt.Fprint(w, "OK")
+	}))
+	defer server.Close()
+	cfg := defaultConfig()
+	cfg.WorkerURL, cfg.ServerID, cfg.NodeToken = server.URL+"/update", "node-a", testNodeToken
+	cfg.ConnectionMode, cfg.ReportInterval, cfg.CollectInterval, cfg.SSHLoginEnabled = connectionModeHTTP, 180, 0, true
+	now := time.Now()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	a := &Agent{cfg: cfg, ctx: ctx, paths: Paths{ConfigFile: filepath.Join(dir, "config.conf")}, log: newLogger(false), wake: make(chan struct{}, 1), lastPost: now, lastPostAttempt: now, fullAt: now}
+	a.startSSHEvents(ctx)
+	defer a.stopSSHEvents()
+	loopDone := make(chan struct{})
+	go func() { defer close(loopDone); a.loop(ctx) }()
+	defer func() { cancel(); <-loopDone }()
+	time.Sleep(100 * time.Millisecond)
+	appendedAt := time.Now()
+	if err := os.WriteFile(data, sshScheduleRow(1, appendedAt), 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case sentAt := <-received:
+		if sentAt.Sub(appendedAt) > 3*time.Second {
+			t.Fatal("actual 1s collector waited for 180s HTTP cadence")
+		}
+		t.Logf("actual Linux collector ticker append-to-real-HTTPS-receive=%s", sentAt.Sub(appendedAt))
+	case <-time.After(5 * time.Second):
+		t.Fatal("collector did not wake actual report loop")
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(a.sshEvents.snapshot().Events) > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(a.sshEvents.snapshot().Events) != 0 {
+		t.Fatal("actual HTTP ACK did not drain queue")
+	}
+	var disk sshCollectorState
+	bytes, err := os.ReadFile(a.sshEvents.path)
+	if err != nil || json.Unmarshal(bytes, &disk) != nil || len(disk.Events) != 0 || disk.Sequence != 1 {
+		t.Fatal("ACK not durable")
+	}
+	t.Logf("actual Linux collector append-to-durable-agent-ACK=%s", time.Since(appendedAt))
+}
 
 func TestSSHJournalControlledCommandAndRecovery(t *testing.T) {
 	dir := t.TempDir()
